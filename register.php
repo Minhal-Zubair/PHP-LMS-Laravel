@@ -317,7 +317,7 @@
 
 <?php
 // Database Connection
-$conn = mysqli_connect("localhost", "root", "", "user_db");
+require_once('db.php');
 
 if (isset($_POST['register_btn'])) {
     $fullname = mysqli_real_escape_string($conn, $_POST['fullname']);

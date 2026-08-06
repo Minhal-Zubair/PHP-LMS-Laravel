@@ -1,6 +1,6 @@
 <?php
 session_start();
-$conn = mysqli_connect("localhost", "root", "", "user_db");
+require_once('db.php');
 
 $message = "";
 $message_type = "";

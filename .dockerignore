@@ -1,0 +1,10 @@
+.git
+.claude
+**/node_modules
+settings-app/vendor
+settings-app/.env
+settings-app/storage/logs/*
+settings-app/storage/framework/cache/data/*
+settings-app/storage/framework/sessions/*
+settings-app/storage/framework/views/*
+PHP-LMS-Laravel

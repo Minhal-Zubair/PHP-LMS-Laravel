@@ -1,11 +1,6 @@
 <?php
 require_once('auth.php');
-
-$conn = mysqli_connect("localhost", "root", "", "user_db");
-
-if (!$conn) {
-    die("Database Connection Failed: " . mysqli_connect_error());
-}
+require_once('db.php');
 
 // Ensure fullname exists to avoid explode errors
 $fullname = isset($_SESSION['fullname']) ? $_SESSION['fullname'] : 'Student';

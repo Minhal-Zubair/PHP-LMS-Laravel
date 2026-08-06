@@ -1,0 +1,52 @@
+server {
+    listen ${PORT} default_server;
+    server_name _;
+
+    client_max_body_size 20M;
+
+    # Plain PHP site (repo root) is the default root for this server block.
+    root /var/www/html;
+    index index.php;
+
+    # --- Laravel app: /settings, /settings/update, /up (health check) ---
+    location ^~ /settings {
+        root /var/www/laravel/public;
+        try_files $uri $uri/ /index.php?$query_string;
+
+        location ~ \.php$ {
+            fastcgi_pass 127.0.0.1:9000;
+            fastcgi_index index.php;
+            include fastcgi_params;
+            fastcgi_param SCRIPT_FILENAME $document_root/index.php;
+        }
+    }
+
+    location = /up {
+        root /var/www/laravel/public;
+        fastcgi_pass 127.0.0.1:9000;
+        fastcgi_index index.php;
+        include fastcgi_params;
+        fastcgi_param SCRIPT_FILENAME /var/www/laravel/public/index.php;
+    }
+
+    location ^~ /build/ {
+        root /var/www/laravel/public;
+        try_files $uri =404;
+    }
+
+    # --- Plain PHP site (repo root) ---
+    location / {
+        try_files $uri $uri/ /index.php?$query_string;
+    }
+
+    location ~ \.php$ {
+        fastcgi_pass 127.0.0.1:9000;
+        fastcgi_index index.php;
+        include fastcgi_params;
+        fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
+    }
+
+    location ~ /\.(?!well-known) {
+        deny all;
+    }
+}

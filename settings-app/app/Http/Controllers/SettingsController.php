@@ -15,7 +15,7 @@ class SettingsController extends Controller
 
         if (!$userId) {
             // If no session, redirect back to your original login page
-            return redirect('../../login.php');
+            return redirect('/login.php');
         }
 
         // Fetch user data from the database

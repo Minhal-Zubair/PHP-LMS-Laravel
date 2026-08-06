@@ -1,6 +1,6 @@
 ﻿<?php
 require_once('auth.php');
-$conn = mysqli_connect("localhost", "root", "", "user_db");
+require_once('db.php');
 
 if (!isset($_SESSION['user_id'])) {
     header("Location: login.php");

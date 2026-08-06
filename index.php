@@ -17,14 +17,14 @@
 
     <style>
         :root {
-            --primary: #4e73df;
-            --secondary: #224abe;
-            --dark: #2c3e50;
-            --light: #f8f9fc;
-            --accent: #f6c23e;
-            --text: #5a5c69;
-            --white: #ffffff;
-        }
+    --primary: #e56a31;
+    --secondary: #d48b4b;
+    --dark: #b3492b;
+    --light: #F7FAF8;
+    --accent: #df965f;
+    --text: #555555;
+    --white: #FFFFFF;
+}
 
         * {
             margin: 0;
@@ -107,7 +107,7 @@
 
         /* --- Hero Section --- */
         .hero {
-            background: linear-gradient(135deg, rgba(78, 115, 223, 0.9), rgba(34, 74, 190, 0.8)),
+            background: linear-gradient(135deg, rgba(223, 112, 78, 0.9), rgba(34, 74, 190, 0.8)),
                 url('https://images.unsplash.com/photo-1523240795612-9a054b0db644?auto=format&fit=crop&w=1920&q=80');
             background-size: cover;
             background-position: center;
