@@ -10,6 +10,7 @@
 SET SQL_MODE = "NO_AUTO_VALUE_ON_ZERO";
 START TRANSACTION;
 SET time_zone = "+00:00";
+SET FOREIGN_KEY_CHECKS = 0;
 
 
 /*!40101 SET @OLD_CHARACTER_SET_CLIENT=@@CHARACTER_SET_CLIENT */;
@@ -138,9 +139,16 @@ CREATE TABLE IF NOT EXISTS `tasks` (
   `user_id` int(11) NOT NULL,
   `task_name` varchar(255) NOT NULL,
   `status` varchar(20) DEFAULT 'Pending',
+  `course_id` int(11) DEFAULT NULL,
+  `due_date` date DEFAULT NULL,
+  `priority` enum('low','medium','high') NOT NULL DEFAULT 'medium',
+  `estimated_hours` decimal(4,2) DEFAULT NULL,
+  `completed_at` timestamp NULL DEFAULT NULL,
   `created_at` timestamp NOT NULL DEFAULT current_timestamp(),
   PRIMARY KEY (`id`),
-  KEY `user_id` (`user_id`)
+  KEY `user_id` (`user_id`),
+  KEY `course_id` (`course_id`),
+  KEY `due_date` (`due_date`)
 ) ENGINE=InnoDB AUTO_INCREMENT=8 DEFAULT CHARSET=latin1 COLLATE=latin1_swedish_ci;
 
 --
@@ -186,6 +194,49 @@ INSERT INTO `users` (`id`, `fullname`, `email`, `username`, `password`, `gender`
 (2, 'Minhal Zubair', 'minhalzubair.work@gmail.com', 'minhal', '$2y$10$UTvd2/3oEZVVf0cd8xtEt.6m6jES9qYmjhz4otih1MMtfFfPXHKQW', 'Female', '033333333', 'LHR\r\n', '2026-07-06 12:21:10'),
 (3, 'User Name ', 'username@gmail.com', 'username', '$2y$10$VtTpxfhDDxuZTeI1GdasrODd8Z8uU2gPQXVTS6soDEqB02fTf1bIu', 'Male', '033333', 'La\r\n', '2026-07-07 05:53:07');
 
+-- --------------------------------------------------------
+
+--
+-- Table structure for table `remember_tokens`
+-- Added to support secure, server-verified "Remember Me" logins
+-- (selector/validator pattern) instead of trusting raw cookie values.
+--
+
+DROP TABLE IF EXISTS `remember_tokens`;
+CREATE TABLE IF NOT EXISTS `remember_tokens` (
+  `id` int(11) NOT NULL AUTO_INCREMENT,
+  `user_id` int(11) NOT NULL,
+  `selector` varchar(24) NOT NULL,
+  `validator_hash` char(64) NOT NULL,
+  `expires_at` datetime NOT NULL,
+  `created_at` timestamp NOT NULL DEFAULT current_timestamp(),
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `selector` (`selector`),
+  KEY `user_id` (`user_id`),
+  KEY `expires_at` (`expires_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- --------------------------------------------------------
+
+--
+-- Table structure for table `password_resets`
+-- Supports the forgot-password flow: a short-lived, single-use, hashed
+-- token per reset request (never store the raw token itself).
+--
+
+DROP TABLE IF EXISTS `password_resets`;
+CREATE TABLE IF NOT EXISTS `password_resets` (
+  `id` int(11) NOT NULL AUTO_INCREMENT,
+  `user_id` int(11) NOT NULL,
+  `token_hash` char(64) NOT NULL,
+  `expires_at` datetime NOT NULL,
+  `created_at` timestamp NOT NULL DEFAULT current_timestamp(),
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `token_hash` (`token_hash`),
+  KEY `user_id` (`user_id`),
+  KEY `expires_at` (`expires_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 --
 -- Constraints for dumped tables
 --
@@ -195,6 +246,23 @@ INSERT INTO `users` (`id`, `fullname`, `email`, `username`, `password`, `gender`
 --
 ALTER TABLE `tasks`
   ADD CONSTRAINT `tasks_ibfk_1` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE CASCADE;
+
+ALTER TABLE `tasks`
+  ADD CONSTRAINT `tasks_ibfk_2` FOREIGN KEY (`course_id`) REFERENCES `courses` (`id`) ON DELETE SET NULL;
+
+--
+-- Constraints for table `remember_tokens`
+--
+ALTER TABLE `remember_tokens`
+  ADD CONSTRAINT `remember_tokens_ibfk_1` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE CASCADE;
+
+--
+-- Constraints for table `password_resets`
+--
+ALTER TABLE `password_resets`
+  ADD CONSTRAINT `password_resets_ibfk_1` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE CASCADE;
+
+SET FOREIGN_KEY_CHECKS = 1;
 COMMIT;
 
 /*!40101 SET CHARACTER_SET_CLIENT=@OLD_CHARACTER_SET_CLIENT */;

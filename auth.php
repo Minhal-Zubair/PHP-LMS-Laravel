@@ -1,17 +1,22 @@
 <?php
 session_start();
+require_once __DIR__ . '/db.php';
+require_once __DIR__ . '/helpers.php';
 
-// If Session doesn't exist, check for Cookies
+// If there's no active session, the ONLY way back in is a verified
+// remember-me token looked up server-side — never trust cookie values
+// directly (the old code did `$_SESSION['user_id'] = $_COOKIE['user_id']`,
+// which let anyone log in as any user by just setting a cookie).
 if (!isset($_SESSION['user_id'])) {
-    if (isset($_COOKIE['user_id']) && isset($_COOKIE['user_login'])) {
-        // Re-establish session from cookies
-        $_SESSION['user_id'] = $_COOKIE['user_id'];
-        $_SESSION['username'] = $_COOKIE['user_login'];
-        $_SESSION['fullname'] = $_COOKIE['user_name'];
+    $user = function_exists('verify_remember_token') ? verify_remember_token($conn) : null;
+
+    if ($user) {
+        session_regenerate_id(true);
+        $_SESSION['user_id'] = $user['id'];
+        $_SESSION['username'] = $user['username'];
+        $_SESSION['fullname'] = $user['fullname'];
     } else {
-        // Neither session nor cookie exists - Boot them to login
         header("Location: login.php");
         exit();
     }
 }
-?>

@@ -1,18 +1,16 @@
 <?php
 session_start();
+require_once __DIR__ . '/db.php';
+require_once __DIR__ . '/helpers.php';
 
-// 1. Clear Session
+// Invalidate the remember-me token server-side too, not just the cookie —
+// otherwise a copy of the old cookie would still work after "logout".
+if (function_exists('clear_remember_token')) {
+    clear_remember_token($conn);
+}
+
 session_unset();
 session_destroy();
 
-// 2. Clear Cookies (Set expiration time to past)
-if (isset($_COOKIE['user_id'])) {
-    setcookie("user_id", "", time() - 3600, "/");
-    setcookie("user_login", "", time() - 3600, "/");
-    setcookie("user_name", "", time() - 3600, "/");
-}
-
-// 3. Redirect
 header("Location: login.php");
 exit();
-?>

@@ -1,23 +1,10 @@
 ﻿<?php
-require_once('auth.php');
-require_once('db.php');
-
-if (!isset($_SESSION['user_id'])) {
-    header("Location: login.php");
-    exit();
-}
+require_once __DIR__ . '/auth.php';   // already redirects to login.php if not authenticated
+require_once __DIR__ . '/helpers.php';
 
 // Get User Info from Session
-$user_id = $_SESSION['user_id'];
+$user_id = (int) $_SESSION['user_id'];
 $fullname = $_SESSION['fullname'];
-
-// Helper to check for column existence in a table
-function column_exists($conn, $table, $column)
-{
-    $col = mysqli_real_escape_string($conn, $column);
-    $res = mysqli_query($conn, "SHOW COLUMNS FROM `" . mysqli_real_escape_string($conn, $table) . "` LIKE '$col'");
-    return ($res && mysqli_num_rows($res) > 0);
-}
 
 function normalize_schedule_time($value)
 {
@@ -45,145 +32,318 @@ function format_schedule_time($value)
     return $ts ? date('h:i A', $ts) : '';
 }
 
-// Detect schema: whether schedule uses `time_slot` or start_time/end_time
-$has_time_slot = column_exists($conn, 'schedule', 'time_slot');
+// Determine which page/tab to display (whitelist to avoid surprises)
+$allowed_pages = ['dashboard', 'courses', 'schedule'];
+$page = isset($_GET['page']) && in_array($_GET['page'], $allowed_pages, true) ? $_GET['page'] : 'dashboard';
 
-// Determine which page/tab to display
-$page = isset($_GET['page']) ? $_GET['page'] : 'dashboard';
-
+// ---------------------------------------------------------------------
 // ADD TASK
+// ---------------------------------------------------------------------
 if (isset($_POST['add_task'])) {
-    $task_name = mysqli_real_escape_string($conn, $_POST['task_name']);
-    if (!empty($task_name)) {
-        mysqli_query($conn, "INSERT INTO tasks (user_id, task_name, status) VALUES ('$user_id', '$task_name', 'Pending')");
-        header("Location: dashboard.php?page=dashboard");
+    csrf_verify();
+    $task_name = trim($_POST['task_name'] ?? '');
+
+    // All of these are optional — a quick task with just a name still works.
+    $task_course_id = !empty($_POST['course_id']) ? (int) $_POST['course_id'] : null;
+    $task_due_date = !empty($_POST['due_date']) ? $_POST['due_date'] : null;
+    $task_priority = in_array($_POST['priority'] ?? '', ['low', 'medium', 'high'], true) ? $_POST['priority'] : 'medium';
+    $task_hours = (isset($_POST['estimated_hours']) && $_POST['estimated_hours'] !== '')
+        ? round((float) $_POST['estimated_hours'], 2) : null;
+
+    // Validate due_date is a real date (reject garbage instead of letting
+    // MySQL silently coerce it to 0000-00-00 or error out).
+    if ($task_due_date !== null && !preg_match('/^\d{4}-\d{2}-\d{2}$/', $task_due_date)) {
+        $task_due_date = null;
     }
-}
 
+    // If a course was selected, confirm it actually belongs to this user —
+    // otherwise someone could tag a task to another user's course_id by
+    // editing the form.
+    if ($task_course_id !== null) {
+        $check = $conn->prepare("SELECT id FROM courses WHERE id = ? AND user_id = ?");
+        $check->bind_param('ii', $task_course_id, $user_id);
+        $check->execute();
+        if (!$check->get_result()->fetch_assoc()) {
+            $task_course_id = null;
+        }
+        $check->close();
+    }
 
-// TOGGLE TASK STATUS 
-if (isset($_GET['toggle_id'])) {
-    $tid = $_GET['toggle_id'];
-    // Verify the task belongs to the logged-in user
-    $check = mysqli_query($conn, "SELECT status FROM tasks WHERE id='$tid' AND user_id='$user_id'");
-    if (mysqli_num_rows($check) > 0) {
-        $res = mysqli_fetch_assoc($check);
-        $new_status = ($res['status'] == 'Pending') ? 'Completed' : 'Pending';
-        mysqli_query($conn, "UPDATE tasks SET status='$new_status' WHERE id='$tid'");
+    if ($task_name !== '') {
+        $stmt = $conn->prepare(
+            "INSERT INTO tasks (user_id, task_name, status, course_id, due_date, priority, estimated_hours)
+             VALUES (?, ?, 'Pending', ?, ?, ?, ?)"
+        );
+        $stmt->bind_param('isissd', $user_id, $task_name, $task_course_id, $task_due_date, $task_priority, $task_hours);
+        $stmt->execute();
+        $stmt->close();
     }
     header("Location: dashboard.php?page=dashboard");
+    exit();
+}
+
+// TOGGLE TASK STATUS
+if (isset($_GET['toggle_id'])) {
+    $tid = (int) $_GET['toggle_id'];
+    $stmt = $conn->prepare("SELECT status FROM tasks WHERE id = ? AND user_id = ?");
+    $stmt->bind_param('ii', $tid, $user_id);
+    $stmt->execute();
+    $res = $stmt->get_result()->fetch_assoc();
+    $stmt->close();
+
+    if ($res) {
+        $new_status = ($res['status'] == 'Pending') ? 'Completed' : 'Pending';
+        if ($new_status === 'Completed') {
+            $stmt = $conn->prepare("UPDATE tasks SET status = ?, completed_at = NOW() WHERE id = ? AND user_id = ?");
+        } else {
+            $stmt = $conn->prepare("UPDATE tasks SET status = ?, completed_at = NULL WHERE id = ? AND user_id = ?");
+        }
+        $stmt->bind_param('sii', $new_status, $tid, $user_id);
+        $stmt->execute();
+        $stmt->close();
+    }
+    header("Location: dashboard.php?page=dashboard");
+    exit();
 }
 
 // DELETE TASK
 if (isset($_GET['delete_id'])) {
-    $did = $_GET['delete_id'];
-    mysqli_query($conn, "DELETE FROM tasks WHERE id='$did' AND user_id='$user_id'");
+    $did = (int) $_GET['delete_id'];
+    $stmt = $conn->prepare("DELETE FROM tasks WHERE id = ? AND user_id = ?");
+    $stmt->bind_param('ii', $did, $user_id);
+    $stmt->execute();
+    $stmt->close();
     header("Location: dashboard.php?page=dashboard");
+    exit();
 }
 
-$tasks_query = mysqli_query($conn, "SELECT * FROM tasks WHERE user_id='$user_id' ORDER BY status DESC, created_at DESC");
+$stmt = $conn->prepare(
+    "SELECT t.*, c.course_name
+     FROM tasks t
+     LEFT JOIN courses c ON c.id = t.course_id
+     WHERE t.user_id = ?
+     ORDER BY t.status DESC, t.due_date IS NULL, t.due_date ASC, t.created_at DESC"
+);
+$stmt->bind_param('i', $user_id);
+$stmt->execute();
+$tasks_query = $stmt->get_result();
+$stmt->close();
 
 // Get Statistics for the Progress Bar
-$stat_res = mysqli_query($conn, "SELECT COUNT(*) as total, SUM(status='Completed') as done FROM tasks WHERE user_id='$user_id'");
-$stats = mysqli_fetch_assoc($stat_res);
+$stmt = $conn->prepare("SELECT COUNT(*) as total, SUM(status='Completed') as done FROM tasks WHERE user_id = ?");
+$stmt->bind_param('i', $user_id);
+$stmt->execute();
+$stats = $stmt->get_result()->fetch_assoc();
+$stmt->close();
 $percent = ($stats['total'] > 0) ? round(($stats['done'] / $stats['total']) * 100) : 0;
 
+// ---------------------------------------------------------------------
+// STUDENT INSIGHTS (dashboard tab only — skip the extra queries on other
+// tabs where none of this is shown)
+//
+// Every number here is either a direct count/sum from the DB or a simple,
+// documented weighted average — nothing here is "AI" or a black box.
+// ---------------------------------------------------------------------
+$insights = null;
+if ($page === 'dashboard') {
+    // Average course progress (0 if no courses yet)
+    $stmt = $conn->prepare("SELECT AVG(progress) AS avg_progress, COUNT(*) AS course_count FROM courses WHERE user_id = ?");
+    $stmt->bind_param('i', $user_id);
+    $stmt->execute();
+    $course_stats = $stmt->get_result()->fetch_assoc();
+    $stmt->close();
+    $avg_course_progress = $course_stats['avg_progress'] !== null ? (float) $course_stats['avg_progress'] : 0;
 
-if (isset($_POST['add_course'])) {
-    $c_name = mysqli_real_escape_string($conn, $_POST['course_name']);
-    $inst = mysqli_real_escape_string($conn, $_POST['instructor']);
-    $cat = mysqli_real_escape_string($conn, $_POST['category']);
-    $link = mysqli_real_escape_string($conn, $_POST['course_link']);
+    // Task completion rate — all-time completed / all-time total (same
+    // numbers already shown in the progress bar above, reused here).
+    $task_completion_rate = $percent;
 
-    $query = "INSERT INTO courses (user_id, course_name, instructor, category, course_link) 
-              VALUES ('$user_id', '$c_name', '$inst', '$cat', '$link')";
-    mysqli_query($conn, $query);
-    header("Location: dashboard.php?page=courses");
+    // Academic Health = 50% average course progress + 50% task completion
+    // rate. Simple, explainable, and both halves are numbers already
+    // computed elsewhere on this page — not a hidden formula.
+    $academic_health = ($course_stats['course_count'] > 0)
+        ? round(($avg_course_progress * 0.5) + ($task_completion_rate * 0.5))
+        : $task_completion_rate; // no courses yet: fall back to task completion alone
+
+    // At-risk courses: progress under 40%, OR 2+ pending tasks due within
+    // the next 3 days that are linked to that course.
+    $stmt = $conn->prepare(
+        "SELECT c.id, c.course_name, c.progress,
+                COUNT(t.id) AS urgent_task_count
+         FROM courses c
+         LEFT JOIN tasks t ON t.course_id = c.id
+                AND t.status = 'Pending'
+                AND t.due_date IS NOT NULL
+                AND t.due_date BETWEEN CURDATE() AND DATE_ADD(CURDATE(), INTERVAL 3 DAY)
+         WHERE c.user_id = ?
+         GROUP BY c.id, c.course_name, c.progress
+         HAVING c.progress < 40 OR urgent_task_count >= 2
+         ORDER BY c.progress ASC
+         LIMIT 5"
+    );
+    $stmt->bind_param('i', $user_id);
+    $stmt->execute();
+    $at_risk_courses = $stmt->get_result()->fetch_all(MYSQLI_ASSOC);
+    $stmt->close();
+
+    // Tasks due in the next 7 days (pending only)
+    $stmt = $conn->prepare(
+        "SELECT COUNT(*) AS due_count FROM tasks
+         WHERE user_id = ? AND status = 'Pending' AND due_date IS NOT NULL
+         AND due_date BETWEEN CURDATE() AND DATE_ADD(CURDATE(), INTERVAL 7 DAY)"
+    );
+    $stmt->bind_param('i', $user_id);
+    $stmt->execute();
+    $tasks_due_week = (int) $stmt->get_result()->fetch_assoc()['due_count'];
+    $stmt->close();
+
+    // Weekly workload: sum of estimated_hours for pending tasks due in the
+    // next 7 days. Only counts tasks where hours were actually entered —
+    // we don't invent a number for tasks with no estimate.
+    $stmt = $conn->prepare(
+        "SELECT SUM(estimated_hours) AS total_hours,
+                SUM(CASE WHEN estimated_hours IS NULL THEN 1 ELSE 0 END) AS missing_estimate_count
+         FROM tasks
+         WHERE user_id = ? AND status = 'Pending' AND due_date IS NOT NULL
+         AND due_date BETWEEN CURDATE() AND DATE_ADD(CURDATE(), INTERVAL 7 DAY)"
+    );
+    $stmt->bind_param('i', $user_id);
+    $stmt->execute();
+    $workload_row = $stmt->get_result()->fetch_assoc();
+    $stmt->close();
+    $weekly_workload_hours = $workload_row['total_hours'] !== null ? (float) $workload_row['total_hours'] : 0;
+    $weekly_workload_missing = (int) ($workload_row['missing_estimate_count'] ?? 0);
+
+    // Today's Priority: up to 3 pending tasks due today/tomorrow, highest
+    // priority first, soonest due date first. Includes course context
+    // (name + progress) when the task is linked to a course.
+    $stmt = $conn->prepare(
+        "SELECT t.id, t.task_name, t.due_date, t.priority, c.course_name, c.progress AS course_progress
+         FROM tasks t
+         LEFT JOIN courses c ON c.id = t.course_id
+         WHERE t.user_id = ? AND t.status = 'Pending' AND t.due_date IS NOT NULL
+         AND t.due_date <= DATE_ADD(CURDATE(), INTERVAL 1 DAY)
+         ORDER BY FIELD(t.priority, 'high', 'medium', 'low'), t.due_date ASC
+         LIMIT 3"
+    );
+    $stmt->bind_param('i', $user_id);
+    $stmt->execute();
+    $priority_tasks = $stmt->get_result()->fetch_all(MYSQLI_ASSOC);
+    $stmt->close();
+
+    // User's own courses, for the "add task" form's course dropdown.
+    $stmt = $conn->prepare("SELECT id, course_name FROM courses WHERE user_id = ? ORDER BY course_name ASC");
+    $stmt->bind_param('i', $user_id);
+    $stmt->execute();
+    $user_courses_for_dropdown = $stmt->get_result()->fetch_all(MYSQLI_ASSOC);
+    $stmt->close();
+
+    $insights = [
+        'academic_health' => $academic_health,
+        'at_risk_courses' => $at_risk_courses,
+        'tasks_due_week' => $tasks_due_week,
+        'weekly_workload_hours' => $weekly_workload_hours,
+        'weekly_workload_missing' => $weekly_workload_missing,
+        'priority_tasks' => $priority_tasks,
+    ];
 }
 
-if (isset($_POST['add_schedule']) || isset($_POST['do_update_schedule'])) {
-    $day = mysqli_real_escape_string($conn, $_POST['day']);
-    $subject = mysqli_real_escape_string($conn, $_POST['subject']);
-    $start = mysqli_real_escape_string($conn, $_POST['start_time']);
-    $end = mysqli_real_escape_string($conn, $_POST['end_time']);
-    $room = mysqli_real_escape_string($conn, $_POST['room']);
+// ---------------------------------------------------------------------
+// ADD COURSE
+// ---------------------------------------------------------------------
+if (isset($_POST['add_course'])) {
+    csrf_verify();
+    $c_name = trim($_POST['course_name'] ?? '');
+    $inst = trim($_POST['instructor'] ?? '');
+    $cat = trim($_POST['category'] ?? '');
+    $link = trim($_POST['course_link'] ?? '');
 
-    if (strtotime($start) < strtotime($end)) {
-        // Convert to 24h SQL time format
+    if ($c_name !== '') {
+        $stmt = $conn->prepare(
+            "INSERT INTO courses (user_id, course_name, instructor, category, course_link) VALUES (?, ?, ?, ?, ?)"
+        );
+        $stmt->bind_param('issss', $user_id, $c_name, $inst, $cat, $link);
+        $stmt->execute();
+        $stmt->close();
+    }
+    header("Location: dashboard.php?page=courses");
+    exit();
+}
+
+// ---------------------------------------------------------------------
+// ADD / UPDATE SCHEDULE
+// ---------------------------------------------------------------------
+if (isset($_POST['add_schedule']) || isset($_POST['do_update_schedule'])) {
+    csrf_verify();
+    $day = trim($_POST['day'] ?? '');
+    $subject = trim($_POST['subject'] ?? '');
+    $start = trim($_POST['start_time'] ?? '');
+    $end = trim($_POST['end_time'] ?? '');
+    $room = trim($_POST['room'] ?? '');
+
+    $allowed_days = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+
+    if (!in_array($day, $allowed_days, true) || $subject === '' || $start === '' || $end === '') {
+        echo "<script>alert('Please fill in all schedule fields correctly.'); window.history.back();</script>";
+        exit();
+    }
+
+    if (strtotime($start) !== false && strtotime($end) !== false && strtotime($start) < strtotime($end)) {
         $start_sql = date('H:i:s', strtotime($start));
         $end_sql = date('H:i:s', strtotime($end));
-        $time_range = $start . "|" . $end;
 
         if (isset($_POST['do_update_schedule'])) {
-            $id = (int)$_POST['update_id'];
-            if ($has_time_slot) {
-                $query = "UPDATE schedule SET day='$day', subject='$subject', time_slot='$time_range', room='$room' WHERE id='$id' AND user_id='$user_id'";
-            } else {
-                $query = "UPDATE schedule SET day='$day', subject='$subject', start_time='$start_sql', end_time='$end_sql', room='$room' WHERE id='$id'";
-            }
+            $id = (int) $_POST['update_id'];
+            $stmt = $conn->prepare(
+                "UPDATE schedule SET day=?, subject=?, start_time=?, end_time=?, room=? WHERE id=? AND user_id=?"
+            );
+            $stmt->bind_param('sssssii', $day, $subject, $start_sql, $end_sql, $room, $id, $user_id);
         } else {
-            if ($has_time_slot) {
-                $query = "INSERT INTO schedule (user_id, day, subject, time_slot, room, created_at) VALUES ('$user_id', '$day', '$subject', '$time_range', '$room', NOW())";
-            } else {
-                $query = "INSERT INTO schedule (user_id, day, subject, start_time, end_time, room, created_at) VALUES ('$user_id', '$day', '$subject', '$start_sql', '$end_sql', '$room', NOW())";
-            }
+            $stmt = $conn->prepare(
+                "INSERT INTO schedule (user_id, day, subject, start_time, end_time, room, created_at) VALUES (?, ?, ?, ?, ?, ?, NOW())"
+            );
+            $stmt->bind_param('isssss', $user_id, $day, $subject, $start_sql, $end_sql, $room);
         }
 
-        mysqli_query($conn, $query);
+        $stmt->execute();
+        $stmt->close();
         header("Location: dashboard.php?page=schedule");
         exit();
     } else {
-        echo "<script>alert('Error: Start time must be before end time');</script>";
+        echo "<script>alert('Error: Start time must be before end time'); window.history.back();</script>";
+        exit();
     }
 }
 
+// DELETE SCHEDULE — ownership check restored (this was previously removed,
+// letting any logged-in user delete anyone else's schedule entries)
 if (isset($_GET['del_sch_id'])) {
-    $sid = (int)$_GET['del_sch_id'];
-    // Removed AND user_id='$user_id'
-    mysqli_query($conn, "DELETE FROM schedule WHERE id='$sid'");
+    $sid = (int) $_GET['del_sch_id'];
+    $stmt = $conn->prepare("DELETE FROM schedule WHERE id = ? AND user_id = ?");
+    $stmt->bind_param('ii', $sid, $user_id);
+    $stmt->execute();
+    $stmt->close();
     header("Location: dashboard.php?page=schedule");
+    exit();
 }
 
-// --- Dynamic Backgrounds Logic ---
-$bg_images = [
-    'dashboard' => 'https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcQ9MnEtio_vgCW0Odfxh9JTPsL2jMdrUsaCl80rTBu3Q0JQIdntlwGNDg&s=10', // Office/Clean
-    'courses'   => 'https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcS8SXk9X4H5cXJNPabhbhmqx2BaZ07XqM1vd6YquwVn8s6rhd0BMKBqq6yy&s=10', // Library
-    'schedule'  => 'https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcSpm60wN47EiLr0GEXzJzHbHya_CgXqFH7iNKG6ZM7NrckP3jIgAtlKmOY&s=10'  // Calendar/Planner
-];
-
-// Fallback if page doesn't exist in array
-$current_bg = isset($bg_images[$page]) ? $bg_images[$page] : $bg_images['dashboard'];
-
-// Detect whether DB has a `time_slot` column (some installs use start_time/end_time instead)
-$has_time_slot = false;
-$col_check = mysqli_query($conn, "SHOW COLUMNS FROM schedule LIKE 'time_slot'");
-if ($col_check && mysqli_num_rows($col_check) > 0) {
-    $has_time_slot = true;
-}
-
+// EDIT SCHEDULE — also scoped to the current user, same reasoning as delete above.
 $edit_data = null;
+$edit_start = '';
+$edit_end = '';
 if (isset($_GET['edit_sch_id'])) {
-    $edit_id = (int)$_GET['edit_sch_id'];
-    $edit_res = mysqli_query($conn, "SELECT * FROM schedule WHERE id='$edit_id'");
-    $edit_data = mysqli_fetch_assoc($edit_res);
+    $edit_id = (int) $_GET['edit_sch_id'];
+    $stmt = $conn->prepare("SELECT * FROM schedule WHERE id = ? AND user_id = ?");
+    $stmt->bind_param('ii', $edit_id, $user_id);
+    $stmt->execute();
+    $edit_data = $stmt->get_result()->fetch_assoc();
+    $stmt->close();
 
-    // Populate edit start/end based on available columns
     if ($edit_data) {
-        if ($has_time_slot && !empty($edit_data['time_slot']) && strpos($edit_data['time_slot'], '|') !== false) {
-            $times = explode('|', $edit_data['time_slot']);
-            $edit_start = $times[0];
-            $edit_end = $times[1];
-        } elseif (!empty($edit_data['start_time']) || !empty($edit_data['end_time'])) {
-            $edit_start = !empty($edit_data['start_time']) ? date('h:i A', strtotime($edit_data['start_time'])) : '';
-            $edit_end = !empty($edit_data['end_time']) ? date('h:i A', strtotime($edit_data['end_time'])) : '';
-        } else {
-            $edit_start = '';
-            $edit_end = '';
-        }
+        $edit_start = !empty($edit_data['start_time']) ? date('h:i A', strtotime($edit_data['start_time'])) : '';
+        $edit_end = !empty($edit_data['end_time']) ? date('h:i A', strtotime($edit_data['end_time'])) : '';
     }
 }
-
-
 ?>
 
 <!DOCTYPE html>
@@ -196,456 +356,7 @@ if (isset($_GET['edit_sch_id'])) {
     <!-- Google Fonts & Icons -->
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
-    <style>
-        :root {
-            --primary: #4e73df;
-            --primary-dark: #2e59d9;
-            --dark: #1a1c23;
-            --bg: #f4f7fe;
-            --success: #00ba94;
-            --white: #ffffff;
-            --text-main: #2d3748;
-            --text-muted: #718096;
-        }
-
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-            font-family: 'Inter', sans-serif;
-        }
-
-        body {
-            display: flex;
-            background-color: var(--bg);
-            color: var(--text-main);
-            min-height: 100vh;
-        }
-
-        /* Sidebar Navigation */
-        .sidebar {
-            width: 260px;
-            background: var(--dark);
-            color: #fff;
-            padding: 30px 20px;
-            position: sticky;
-            top: 0;
-            height: 100vh;
-            flex-shrink: 0;
-            display: flex;
-            flex-direction: column;
-        }
-
-        .sidebar .brand {
-            font-size: 22px;
-            font-weight: 700;
-            color: var(--primary);
-            margin-bottom: 40px;
-            display: flex;
-            align-items: center;
-            gap: 12px;
-        }
-
-        .nav-link {
-            color: #a0aec0;
-            text-decoration: none;
-            display: flex;
-            align-items: center;
-            gap: 15px;
-            padding: 12px 15px;
-            border-radius: 12px;
-            transition: 0.3s;
-            margin-bottom: 8px;
-            font-weight: 500;
-        }
-
-        .nav-link:hover,
-        .nav-link.active {
-            background: rgba(255, 255, 255, 0.05);
-            color: #fff;
-        }
-
-        .nav-link.active {
-            background: var(--primary);
-            box-shadow: 0 4px 12px rgba(78, 115, 223, 0.3);
-        }
-
-        .logout-link {
-            margin-top: auto;
-            color: #fc8181 !important;
-            padding: 12px 15px;
-        }
-
-        /* Main Content */
-        .main-content {
-            flex-grow: 1;
-            padding: 40px;
-            overflow-y: auto;
-        }
-
-        .top-header {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            margin-bottom: 35px;
-        }
-
-        .user-badge {
-            background: var(--white);
-            padding: 8px 18px;
-            border-radius: 50px;
-            font-weight: 600;
-            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.02);
-            font-size: 14px;
-        }
-
-        /* Dashboard Cards */
-        .card {
-            background: var(--white);
-            border-radius: 18px;
-            padding: 25px;
-            box-shadow: 0 10px 25px rgba(0, 0, 0, 0.03);
-            margin-bottom: 25px;
-        }
-
-        .banner {
-            background: linear-gradient(135deg, #4e73df 0%, #224abe 100%);
-            color: white;
-        }
-
-        /* Progress Bar */
-        .progress-container {
-            background: rgba(255, 255, 255, 0.2);
-            height: 8px;
-            border-radius: 10px;
-            margin: 15px 0 5px;
-        }
-
-        .progress-fill {
-            background: #fff;
-            height: 100%;
-            border-radius: 10px;
-            transition: 0.8s ease;
-        }
-
-        .layout-grid {
-            display: grid;
-            grid-template-columns: 1fr 2fr;
-            gap: 25px;
-        }
-
-        /* Tasks */
-        .task-item {
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            padding: 15px 0;
-            border-bottom: 1px solid #f1f5f9;
-        }
-
-        .task-item:last-child {
-            border-bottom: none;
-        }
-
-        .task-item.completed h4 {
-            text-decoration: line-through;
-            color: var(--text-muted);
-        }
-
-        .check-icon {
-            font-size: 20px;
-            cursor: pointer;
-            transition: 0.3s;
-            color: #cbd5e0;
-        }
-
-        .task-item.completed .check-icon {
-            color: var(--success);
-        }
-
-        /* Courses */
-        .course-grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
-            gap: 25px;
-        }
-
-        .course-card {
-            background: var(--white);
-            border-radius: 18px;
-            overflow: hidden;
-            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.05);
-            transition: 0.3s;
-            border: 1px solid #eee;
-        }
-
-        .course-card:hover {
-            transform: translateY(-8px);
-        }
-
-        .course-header {
-            height: 120px;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            font-size: 40px;
-            color: white;
-        }
-
-        .course-body {
-            padding: 20px;
-        }
-
-        /* Form */
-        input[type="text"] {
-            width: 100%;
-            padding: 12px;
-            border: 1px solid #e2e8f0;
-            border-radius: 10px;
-            margin-bottom: 12px;
-            outline: none;
-        }
-
-        .btn-btn {
-            background: var(--primary);
-            color: white;
-            border: none;
-            padding: 12px;
-            border-radius: 10px;
-            width: 100%;
-            cursor: pointer;
-            font-weight: 600;
-        }
-
-        /* Update the main content to handle the background */
-        .main-content {
-            flex-grow: 1;
-            padding: 40px;
-            overflow-y: auto;
-            background: linear-gradient(rgba(105, 117, 145, 0.85), rgba(67, 77, 106, 0.43)),
-                url('<?php echo $current_bg; ?>');
-            background-size: cover;
-            background-position: center;
-            background-attachment: fixed;
-            transition: background 0.5s ease-in-out;
-        }
-
-        /* Timetable Table Styles */
-        .timetable-container {
-            width: 100%;
-            overflow-x: auto;
-            margin-bottom: 30px;
-        }
-
-        .styled-table {
-            width: 100%;
-            border-collapse: collapse;
-            background: var(--white);
-            border-radius: 15px;
-            overflow: hidden;
-            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.05);
-        }
-
-        .styled-table thead tr {
-            background-color: var(--primary);
-            color: #ffffff;
-            text-align: left;
-            font-weight: 600;
-        }
-
-        .styled-table th,
-        .styled-table td {
-            padding: 15px 20px;
-        }
-
-        .styled-table tbody tr {
-            border-bottom: 1px solid #f1f5f9;
-            transition: 0.2s;
-        }
-
-        .styled-table tbody tr:hover {
-            background-color: #f8faff;
-        }
-
-        .day-badge {
-            padding: 5px 12px;
-            border-radius: 20px;
-            font-size: 11px;
-            font-weight: 700;
-            text-transform: uppercase;
-            background: #eef2ff;
-            color: var(--primary);
-        }
-
-        .time-text {
-            font-weight: 600;
-            color: var(--text-main);
-            font-size: 13px;
-        }
-
-
-
-        .timetable-grid-wrapper {
-            overflow-x: auto;
-            /* Allows scrolling on smaller screens */
-            background: white;
-            padding: 10px;
-            /* Reduced padding */
-            border-radius: 20px;
-            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.05);
-            margin-bottom: 30px;
-        }
-
-        .grid-table {
-            width: max-content;
-            table-layout: auto;
-            /* This forces columns to respect widths and colspans */
-            border-collapse: collapse;
-            
-            /* Ensures it doesn't get too squashed */
-        }
-
-
-        .grid-table th {
-            background: #f8faff;
-            color: var(--primary);
-            font-size: 13px;
-            padding: 15px 5px;
-            border: 1px solid #edf2f7;
-            width: 150px;
-            /* Define the base width of one hour here */
-        }
-
-        .grid-table td {
-            height: 130px;
-            vertical-align: top;
-            padding: 0;
-            border: 1px solid #edf2f7;
-            overflow: hidden;
-            
-        }
-
-        .slot-card {
-            width: 100%;
-            min-height: 130px;
-            box-sizing: border-box;
-            background: #e9f2ff;
-            border-left: 6px solid var(--primary);
-            display: flex;
-            flex-direction: column;
-            justify-content: space-between;
-            align-items: center;
-            text-align: center;
-            padding: 10px;
-        }
-
-        .slot-subject {
-            font-size: 16px;
-            font-weight: 700;
-            color: #1b3d9d;
-            line-height: 1.4;
-            white-space: normal;
-            word-break: break-word;
-        }
-
-        .slot-time {
-            margin-top: 8px;
-            font-size: 13px;
-            color: #4e73df;
-            font-weight: 600;
-        }
-
-        .slot-room {
-            margin-top: 8px;
-            font-size: 12px;
-            color: #666;
-        }
-
-        /* Premium Timetable Styling */
-        .schedule-container {
-            background: var(--white);
-            border-radius: 20px;
-            padding: 30px;
-            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.05);
-            margin-bottom: 30px;
-        }
-
-        .timetable {
-            width: 100%;
-            border-collapse: separate;
-            border-spacing: 0 10px;
-            /* Gap between rows */
-        }
-
-        .timetable th {
-            background: #f8f9fc;
-            color: var(--text-muted);
-            text-transform: uppercase;
-            font-size: 12px;
-            letter-spacing: 1px;
-            padding: 15px;
-            text-align: left;
-            border-bottom: 2px solid #edf2f7;
-        }
-
-        .timetable td {
-            padding: 20px 15px;
-            background: #ffffff;
-            border-top: 1px solid #f1f5f9;
-            border-bottom: 1px solid #f1f5f9;
-        }
-
-        .timetable tr td:first-child {
-            border-left: 1px solid #f1f5f9;
-            border-top-left-radius: 12px;
-            border-bottom-left-radius: 12px;
-            font-weight: 700;
-            color: var(--primary);
-        }
-
-        .timetable tr td:last-child {
-            border-right: 1px solid #f1f5f9;
-            border-top-right-radius: 12px;
-            border-bottom-right-radius: 12px;
-        }
-
-        .timetable tr:hover td {
-            background: #fbfcfe;
-            border-color: var(--primary);
-        }
-
-        .subject-name {
-            font-size: 15px;
-            font-weight: 600;
-            color: var(--dark);
-            display: block;
-        }
-
-        .room-tag {
-            background: #fff5f5;
-            color: #f56565;
-            padding: 4px 10px;
-            border-radius: 6px;
-            font-size: 11px;
-            font-weight: 600;
-        }
-
-
-        @media (max-width: 992px) {
-            .layout-grid {
-                grid-template-columns: 1fr;
-            }
-
-            .sidebar {
-                width: 70px;
-                padding: 20px 10px;
-            }
-
-            .sidebar span {
-                display: none;
-            }
-        }
-    </style>
+    <link rel="stylesheet" href="assets/dashboard.css">
 </head>
 
 <body>
@@ -676,7 +387,7 @@ if (isset($_GET['edit_sch_id'])) {
         <!-- Top Bar -->
         <div class="top-header">
             <div>
-                <h1 style="font-size: 24px;">Welcome, <?php echo explode(' ', $fullname)[0]; ?>!</h1>
+                <h1 style="font-size: 24px;">Welcome, <?php echo e(explode(' ', $fullname)[0]); ?>!</h1>
                 <p style="color: var(--text-muted); font-size: 14px; color: black;"><?php echo date('l, d F Y'); ?></p>
             </div>
             <div class="user-badge">
@@ -685,23 +396,107 @@ if (isset($_GET['edit_sch_id'])) {
         </div>
 
         <?php if ($page == 'dashboard'): ?>
-            <!-- DASHBOARD TAB CONTENT -->
-            <div class="card banner">
-                <h3>Current Goal Completion: <?php echo $percent; ?>%</h3>
-                <div class="progress-container">
-                    <div class="progress-fill" style="width: <?php echo $percent; ?>%"></div>
+            <!-- DASHBOARD TAB CONTENT — Student Insights -->
+
+            <div class="insights-grid">
+                <div class="insight-card">
+                    <div class="insight-label">Academic Health</div>
+                    <div class="insight-value"><?php echo $insights['academic_health']; ?><span style="font-size:16px; color:var(--text-muted);"> / 100</span></div>
+                    <div class="insight-sub <?php echo $insights['academic_health'] >= 70 ? 'good' : ($insights['academic_health'] >= 40 ? 'warn' : 'bad'); ?>">
+                        <?php echo $insights['academic_health'] >= 70 ? '🟢 On Track' : ($insights['academic_health'] >= 40 ? '🟠 Needs Attention' : '🔴 At Risk'); ?>
+                    </div>
                 </div>
-                <p style="font-size: 13px; margin-top: 10px; opacity: 0.9;">
-                    You have finished <?php echo ($stats['done'] ? $stats['done'] : 0); ?> of <?php echo $stats['total']; ?> tasks today.
-                </p>
+                <div class="insight-card">
+                    <div class="insight-label">Courses at Risk</div>
+                    <div class="insight-value"><?php echo count($insights['at_risk_courses']); ?></div>
+                    <div class="insight-sub" style="color: var(--text-muted);">out of <?php echo $course_stats['course_count']; ?> total</div>
+                </div>
+                <div class="insight-card">
+                    <div class="insight-label">Tasks Due (7 days)</div>
+                    <div class="insight-value"><?php echo $insights['tasks_due_week']; ?></div>
+                    <div class="insight-sub" style="color: var(--text-muted);">pending, with a due date set</div>
+                </div>
+                <div class="insight-card">
+                    <div class="insight-label">Weekly Workload</div>
+                    <div class="insight-value"><?php echo rtrim(rtrim(number_format($insights['weekly_workload_hours'], 1), '0'), '.'); ?><span style="font-size:16px; color:var(--text-muted);"> hrs</span></div>
+                    <div class="insight-sub" style="color: var(--text-muted);">
+                        <?php if ($insights['weekly_workload_missing'] > 0): ?>
+                            + <?php echo $insights['weekly_workload_missing']; ?> task<?php echo $insights['weekly_workload_missing'] > 1 ? 's' : ''; ?> with no estimate
+                        <?php else: ?>
+                            based on estimated hours
+                        <?php endif; ?>
+                    </div>
+                </div>
             </div>
+
+            <?php if (!empty($insights['at_risk_courses'])): ?>
+                <div class="card" style="margin-bottom: 20px; border-left: 4px solid #f6c23e;">
+                    <h4 style="margin-bottom: 12px;">⚠️ Courses Needing Attention</h4>
+                    <?php foreach ($insights['at_risk_courses'] as $rc): ?>
+                        <div style="display: flex; justify-content: space-between; align-items: center; padding: 8px 0; border-bottom: 1px solid #f0f0f0;">
+                            <div>
+                                <strong style="font-size: 14px;"><?php echo e($rc['course_name']); ?></strong>
+                                <div style="font-size: 12px; color: var(--text-muted);">
+                                    <?php echo (int) $rc['progress']; ?>% progress
+                                    <?php if ($rc['urgent_task_count'] > 0): ?>
+                                        &middot; <?php echo (int) $rc['urgent_task_count']; ?> task<?php echo $rc['urgent_task_count'] > 1 ? 's' : ''; ?> due soon
+                                    <?php endif; ?>
+                                </div>
+                            </div>
+                            <a href="dashboard.php?page=courses" style="font-size: 12px; color: var(--primary); font-weight: 600; text-decoration: none;">View <i class="fas fa-arrow-right"></i></a>
+                        </div>
+                    <?php endforeach; ?>
+                </div>
+            <?php endif; ?>
+
+            <?php if (!empty($insights['priority_tasks'])): ?>
+                <div class="card" style="margin-bottom: 20px;">
+                    <h4 style="margin-bottom: 12px;">⚡ Today's Priority</h4>
+                    <?php foreach ($insights['priority_tasks'] as $i => $pt): ?>
+                        <div style="display: flex; justify-content: space-between; align-items: center; padding: 8px 0; <?php echo $i < count($insights['priority_tasks']) - 1 ? 'border-bottom: 1px solid #f0f0f0;' : ''; ?>">
+                            <div>
+                                <span class="priority-dot priority-<?php echo e($pt['priority']); ?>"></span>
+                                <strong style="font-size: 14px;"><?php echo e($pt['task_name']); ?></strong>
+                                <?php if ($pt['due_date'] === date('Y-m-d')): ?>
+                                    <span style="font-size: 11px; color: #e02424; font-weight: 600;"> &middot; Due today</span>
+                                <?php else: ?>
+                                    <span style="font-size: 11px; color: var(--text-muted);"> &middot; Due <?php echo date('M j', strtotime($pt['due_date'])); ?></span>
+                                <?php endif; ?>
+                                <?php if ($pt['course_name']): ?>
+                                    <div style="font-size: 12px; color: var(--text-muted);"><?php echo e($pt['course_name']); ?> — <?php echo (int) $pt['course_progress']; ?>% course progress</div>
+                                <?php endif; ?>
+                            </div>
+                        </div>
+                    <?php endforeach; ?>
+                </div>
+            <?php endif; ?>
 
             <div class="layout-grid">
                 <!-- Add Task -->
                 <div class="card">
                     <h4 style="margin-bottom: 15px;">Quick Add Task</h4>
                     <form action="dashboard.php?page=dashboard" method="POST">
+                        <?php echo csrf_field(); ?>
                         <input type="text" name="task_name" placeholder="What's next on your list?" required>
+
+                        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin: 10px 0;">
+                            <select name="course_id" style="padding: 10px; border-radius: 8px; border: 1px solid #ddd;">
+                                <option value="">No course</option>
+                                <?php foreach ($user_courses_for_dropdown as $uc): ?>
+                                    <option value="<?php echo (int) $uc['id']; ?>"><?php echo e($uc['course_name']); ?></option>
+                                <?php endforeach; ?>
+                            </select>
+                            <select name="priority" style="padding: 10px; border-radius: 8px; border: 1px solid #ddd;">
+                                <option value="low">Low priority</option>
+                                <option value="medium" selected>Medium priority</option>
+                                <option value="high">High priority</option>
+                            </select>
+                        </div>
+                        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 10px;">
+                            <input type="date" name="due_date" style="padding: 10px; border-radius: 8px; border: 1px solid #ddd;" min="<?php echo date('Y-m-d'); ?>">
+                            <input type="number" name="estimated_hours" placeholder="Est. hours" step="0.5" min="0" max="99" style="padding: 10px; border-radius: 8px; border: 1px solid #ddd;">
+                        </div>
+
                         <button type="submit" name="add_task" class="btn-btn">Add to List</button>
                     </form>
                 </div>
@@ -718,9 +513,18 @@ if (isset($_GET['edit_sch_id'])) {
                                             <i class="fa<?php echo ($task['status'] == 'Completed') ? 's' : 'r'; ?> fa-check-circle"></i>
                                         </a>
                                         <div>
-                                            <h4 style="font-size: 14px;"><?php echo $task['task_name']; ?></h4>
+                                            <h4 style="font-size: 14px;">
+                                                <span class="priority-dot priority-<?php echo e($task['priority'] ?? 'medium'); ?>"></span>
+                                                <?php echo e($task['task_name']); ?>
+                                            </h4>
                                             <span style="font-size: 11px; color: var(--text-muted);">
-                                                Added at <?php echo date('h:i A', strtotime($task['created_at'])); ?>
+                                                <?php if (!empty($task['course_name'])): ?>
+                                                    <?php echo e($task['course_name']); ?> &middot;
+                                                <?php endif; ?>
+                                                <?php if (!empty($task['due_date'])): ?>
+                                                    Due <?php echo date('M j', strtotime($task['due_date'])); ?> &middot;
+                                                <?php endif; ?>
+                                                Added <?php echo date('h:i A', strtotime($task['created_at'])); ?>
                                             </span>
                                         </div>
                                     </div>
@@ -739,65 +543,13 @@ if (isset($_GET['edit_sch_id'])) {
         <?php elseif ($page == 'courses'): ?>
             <!-- COURSES TAB CONTENT -->
             <h3 style="margin-bottom: 20px;">Academic Enrollment</h3>
-            <div class="course-grid">
 
-                <!-- Card 1 -->
-                <div class="course-card">
-                    <div class="course-header" style="background: #4e73df;"><i class="fas fa-laptop-code"></i></div>
-                    <div class="course-body">
-                        <span class="course-tag">Programming</span>
-                        <h4 style="margin: 10px 0 5px;">Full Stack Web Engineering</h4>
-                        <p style="font-size: 12px; color: var(--text-muted);">Instructor: Dr. Sarah Smith</p>
-                        <div class="progress-container" style="background: #edf2f7;">
-                            <div class="progress-fill" style="width: 80%; background: var(--success);"></div>
-                        </div>
-                        <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 10px;">
-                            <small style="font-weight: 700; font-size: 11px;">80% Mastery</small>
-                            <a href="course_portal.php" style="font-size:12px; color:var(--primary); text-decoration:none; font-weight:600;">Open Portal</a>
-                        </div>
-                    </div>
-                </div>
-
-                <!-- Card 2 -->
-                <div class="course-card">
-                    <div class="course-header" style="background: #1cc88a;"><i class="fas fa-database"></i></div>
-                    <div class="course-info course-body">
-                        <span class="course-tag">Database</span>
-                        <h4 style="margin: 10px 0 5px;">Relational Databases (SQL)</h4>
-                        <p style="font-size: 12px; color: var(--text-muted);">Instructor: Prof. Alan Turing</p>
-                        <div class="progress-container" style="background: #edf2f7;">
-                            <div class="progress-fill" style="width: 45%; background: var(--success);"></div>
-                        </div>
-                        <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 10px;">
-                            <small style="font-weight: 700; font-size: 11px;">45% Mastery</small>
-                            <a href="course_portal.php" style="font-size:12px; color:var(--primary); text-decoration:none; font-weight:600;">Open Portal</a>
-                        </div>
-                    </div>
-                </div>
-
-                <!-- Card 3 -->
-                <div class="course-card">
-                    <div class="course-header" style="background: #f6c23e;"><i class="fas fa-brain"></i></div>
-                    <div class="course-info course-body">
-                        <span class="course-tag">Intelligence</span>
-                        <h4 style="margin: 10px 0 5px;">Artificial Intelligence Basics</h4>
-                        <p style="font-size: 12px; color: var(--text-muted);">Instructor: Dr. Emily Stone</p>
-                        <div class="progress-container" style="background: #edf2f7;">
-                            <div class="progress-fill" style="width: 15%; background: var(--success);"></div>
-                        </div>
-                        <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 10px;">
-                            <small style="font-weight: 700; font-size: 11px;">15% Mastery</small>
-                            <a href="course_portal.php" style="font-size:12px; color:var(--primary); text-decoration:none; font-weight:600;">Open Portal</a>
-                        </div>
-                    </div>
-                </div>
-
-            </div>
             <div style="display: grid; grid-template-columns: 1fr 2.5fr; gap: 25px;">
 
                 <div class="card">
                     <h4 style="margin-bottom:15px;">Add New Course</h4>
                     <form method="POST">
+                        <?php echo csrf_field(); ?>
                         <input type="text" name="course_name" placeholder="Course Title (e.g. Java Programming)" required>
                         <input type="text" name="instructor" placeholder="Instructor Name">
                         <input type="text" name="category" placeholder="Category (e.g. Coding)">
@@ -809,24 +561,28 @@ if (isset($_GET['edit_sch_id'])) {
 
                 <div class="course-grid">
                     <?php
-                    $courses = mysqli_query($conn, "SELECT * FROM courses WHERE user_id='$user_id' ORDER BY id DESC");
-                    if (mysqli_num_rows($courses) > 0):
-                        while ($c = mysqli_fetch_assoc($courses)): ?>
+                    $stmt = $conn->prepare("SELECT * FROM courses WHERE user_id = ? ORDER BY id DESC");
+                    $stmt->bind_param('i', $user_id);
+                    $stmt->execute();
+                    $courses = $stmt->get_result();
+                    $stmt->close();
+                    if ($courses->num_rows > 0):
+                        while ($c = $courses->fetch_assoc()): ?>
                             <div class="course-card">
                                 <div class="course-header" style="background: var(--primary);"><i class="fas fa-graduation-cap"></i></div>
                                 <div class="course-info" style="padding: 20px;">
-                                    <span class="course-tag"><?php echo $c['category']; ?></span>
-                                    <h4 style="margin: 10px 0 5px;"><?php echo $c['course_name']; ?></h4>
-                                    <p style="font-size: 12px; color: var(--text-muted);">By <?php echo $c['instructor']; ?></p>
+                                    <span class="course-tag"><?php echo e($c['category']); ?></span>
+                                    <h4 style="margin: 10px 0 5px;"><?php echo e($c['course_name']); ?></h4>
+                                    <p style="font-size: 12px; color: var(--text-muted);">By <?php echo e($c['instructor']); ?></p>
 
                                     <div class="progress-bar-container" style="background: #edf2f7; height: 6px; margin: 15px 0 5px;">
-                                        <div class="progress-bar-fill" style="width: <?php echo $c['progress']; ?>%; background: var(--success); height: 100%; border-radius: 10px;"></div>
+                                        <div class="progress-bar-fill" style="width: <?php echo (int) $c['progress']; ?>%; background: var(--success); height: 100%; border-radius: 10px;"></div>
                                     </div>
 
                                     <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 10px;">
-                                        <small style="font-weight: 700; font-size: 11px;"><?php echo $c['progress']; ?>% Done</small>
+                                        <small style="font-weight: 700; font-size: 11px;"><?php echo (int) $c['progress']; ?>% Done</small>
                                         <!-- THE LINK -->
-                                        <a href="<?php echo $c['course_link']; ?>" target="_blank" style="font-size: 12px; color: var(--primary); text-decoration: none; font-weight: 600;">
+                                        <a href="<?php echo e(safe_url($c['course_link'])); ?>" target="_blank" rel="noopener noreferrer" style="font-size: 12px; color: var(--primary); text-decoration: none; font-weight: 600;">
                                             Open Material <i class="fas fa-external-link-alt"></i>
                                         </a>
                                     </div>
@@ -843,8 +599,37 @@ if (isset($_GET['edit_sch_id'])) {
 
         <?php elseif ($page == 'schedule'): ?>
             <div class="top-header">
-                <h2 style="font-size: 20px;"><i class="fas fa-th"></i> University Master Schedule</h2>
+                <h2 style="font-size: 20px;"><i class="fas fa-th"></i> My Schedule</h2>
             </div>
+
+            <?php
+            $days = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+            $time_slots = ["08:00:00", "09:00:00", "10:00:00", "11:00:00", "12:00:00", "13:00:00", "14:00:00", "15:00:00", "16:00:00", "17:00:00"];
+
+            // Scoped to the current user — this used to show every user's
+            // classes on one shared grid even though add/edit/delete were
+            // already per-user, which was inconsistent. Each student now
+            // sees only their own schedule.
+            $schedule_lookup = [];
+            $has_any_schedule = false;
+            $stmt = $conn->prepare("SELECT * FROM schedule WHERE user_id = ? ORDER BY day, start_time");
+            $stmt->bind_param('i', $user_id);
+            $stmt->execute();
+            $schedule_result = $stmt->get_result();
+            while ($row = $schedule_result->fetch_assoc()) {
+                $has_any_schedule = true;
+                $key_time = date("H:i:s", strtotime($row['start_time']));
+                $schedule_lookup[$row['day']][$key_time] = $row;
+            }
+            $stmt->close();
+            ?>
+
+            <?php if (!$has_any_schedule): ?>
+                <div class="card" style="text-align: center; padding: 40px 20px; margin-bottom: 20px; color: var(--text-muted);">
+                    <i class="fas fa-calendar-xmark" style="font-size: 32px; color: #cbd5e1; margin-bottom: 10px; display: block;"></i>
+                    No classes scheduled yet. Use the form below to add your first one.
+                </div>
+            <?php endif; ?>
 
             <div class="timetable-grid-wrapper">
                 <table class="grid-table">
@@ -860,50 +645,6 @@ if (isset($_GET['edit_sch_id'])) {
                     </thead>
                     <tbody>
                         <?php
-                        $days = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
-                        // 24-hour keys to match the DB
-                        $time_slots = ["08:00:00", "09:00:00", "10:00:00", "11:00:00", "12:00:00", "13:00:00", "14:00:00", "15:00:00", "16:00:00", "17:00:00"];
-
-                        $dummy_schedule_items = [
-                            ["day" => "Monday", "start_time" => "08:00:00", "end_time" => "10:00:00", "subject" => "Mathematics", "room" => "A-101"],
-                            ["day" => "Monday", "start_time" => "10:00:00", "end_time" => "11:00:00", "subject" => "Statistics", "room" => "B-204"],
-                            ["day" => "Monday", "start_time" => "11:00:00", "end_time" => "14:00:00", "subject" => "Data Structures", "room" => "A-101"], // 14:00 is 2PM
-                            ["day" => "Monday", "start_time" => "14:00:00", "end_time" => "17:00:00", "subject" => "AI", "room" => "B-204"], // 17:00 is 5PM
-                            ["day" => "Tuesday", "start_time" => "08:00:00", "end_time" => "09:00:00", "subject" => "English Literature", "room" => "C-310"],
-                            ["day" => "Tuesday", "start_time" => "09:00:00", "end_time" => "11:00:00", "subject" => "Business", "room" => "C-310"],
-                            ["day" => "Tuesday", "start_time" => "11:00:00", "end_time" => "13:00:00", "subject" => "Database Systems", "room" => "C-310"],
-                            ["day" => "Tuesday", "start_time" => "13:00:00", "end_time" => "15:00:00", "subject" => "Web Development", "room" => "C-310"],
-                            ["day" => "Tuesday", "start_time" => "15:00:00", "end_time" => "17:00:00", "subject" => "Calculus", "room" => "C-310"],
-                            ["day" => "Wednesday", "start_time" => "09:00:00", "end_time" => "12:00:00", "subject" => "Programming Lab", "room" => "Lab-2"],
-                            ["day" => "Wednesday", "start_time" => "12:00:00", "end_time" => "13:00:00", "subject" => "OOP", "room" => "Lab-2"],
-                            ["day" => "Wednesday", "start_time" => "13:00:00", "end_time" => "15:00:00", "subject" => "PakStudies", "room" => "Lab-2"],
-                            ["day" => "Wednesday", "start_time" => "15:00:00", "end_time" => "17:00:00", "subject" => "Ethics", "room" => "Lab-2"],
-                            ["day" => "Thursday", "start_time" => "10:00:00", "end_time" => "12:00:00", "subject" => "Java Prog.", "room" => "D-115"],
-                            ["day" => "Thursday", "start_time" => "12:00:00", "end_time" => "15:00:00", "subject" => "Operating Systems", "room" => "D-115"],
-                            ["day" => "Thursday", "start_time" => "15:00:00", "end_time" => "17:00:00", "subject" => "Data Structures", "room" => "D-115"],
-                            ["day" => "Friday", "start_time" => "09:00:00", "end_time" => "12:00:00", "subject" => "OS Lab", "room" => "D-115"]
-                        ];
-                        $schedule_lookup = [];
-                        $schedule_result = mysqli_query($conn, "SELECT * FROM schedule ORDER BY day, start_time");
-                        if ($schedule_result && mysqli_num_rows($schedule_result) > 0) {
-                            while ($row = mysqli_fetch_assoc($schedule_result)) {
-                                // Ensure keys match HH:MM:SS format
-                                $key_time = date("H:i:s", strtotime($row['start_time']));
-                                $schedule_lookup[$row['day']][$key_time] = $row;
-                            }
-                        } else {
-                            // 2. Only if the entire table is empty, show Dummy Data
-                            foreach ($dummy_schedule_items as $item) {
-                                $key_time = date("H:i:s", strtotime($item['start_time']));
-                                $schedule_lookup[$item['day']][$key_time] = $item;
-                            }
-                        }
-                        // } else {
-                        //     foreach ($dummy_schedule_items as $item) {
-                        //         $schedule_lookup[$item['day']][$item['start_time']] = $item;
-                        //     }
-
-
                         foreach ($days as $day):
                             echo "<tr>";
                             echo "<td class='day-column' style='font-weight:bold; vertical-align:middle; background:#f8faff; align:center;'>" . strtoupper(substr($day, 0, 3)) . "</td>";
@@ -946,9 +687,6 @@ if (isset($_GET['edit_sch_id'])) {
                                     $en_disp = date("h:i A", $end_ts);
                                     $sch_id  = isset($class['id']) ? $class['id'] : 0;
 
-                                    echo "Start: {$class['start_time']} | End: {$class['end_time']} | Colspan: $colspan | Skip: $skip <br>";
-                                    echo "Current Slot: $current_slot | Index: $i <br>";
-
                                     echo "<td colspan='$colspan' style='padding: 5px;'>
                         <div class='slot-card' style='height:100%; border-left: 5px solid var(--primary); background:#eef2ff;'>
                             <strong style='display:block; color:var(--primary-dark); font-size:13px;'>$sub</strong>
@@ -983,8 +721,9 @@ if (isset($_GET['edit_sch_id'])) {
                     </h4>
 
                     <form method="POST" action="dashboard.php?page=schedule">
+                        <?php echo csrf_field(); ?>
                         <?php if ($edit_data): ?>
-                            <input type="hidden" name="update_id" value="<?php echo $edit_data['id']; ?>">
+                            <input type="hidden" name="update_id" value="<?php echo (int) $edit_data['id']; ?>">
                         <?php endif; ?>
 
                         <div class="form-group">
@@ -1026,10 +765,10 @@ if (isset($_GET['edit_sch_id'])) {
                         </div>
 
                         <label style="font-size: 11px; font-weight: 700;">SUBJECT</label>
-                        <input type="text" name="subject" placeholder="e.g. Data Structures" value="<?php echo $edit_data ? $edit_data['subject'] : ''; ?>" required>
+                        <input type="text" name="subject" placeholder="e.g. Data Structures" value="<?php echo $edit_data ? e($edit_data['subject']) : ''; ?>" required>
 
                         <label style="font-size: 11px; font-weight: 700;">ROOM / LINK</label>
-                        <input type="text" name="room" placeholder="e.g. Hall 02" value="<?php echo $edit_data ? $edit_data['room'] : ''; ?>" required>
+                        <input type="text" name="room" placeholder="e.g. Hall 02" value="<?php echo $edit_data ? e($edit_data['room']) : ''; ?>" required>
 
                         <?php if ($edit_data): ?>
                             <button type="submit" name="do_update_schedule" class="btn-btn" style="background: #f6c23e; color: #333;">Update Existing Lecture</button>

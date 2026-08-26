@@ -1,0 +1,513 @@
+:root {
+            --primary: #4e73df;
+            --primary-dark: #2e59d9;
+            --dark: #1a1c23;
+            --bg: #f4f7fe;
+            --success: #00ba94;
+            --white: #ffffff;
+            --text-main: #2d3748;
+            --text-muted: #718096;
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+            font-family: 'Inter', sans-serif;
+        }
+
+        body {
+            display: flex;
+            background-color: var(--bg);
+            color: var(--text-main);
+            min-height: 100vh;
+        }
+
+        /* Sidebar Navigation */
+        .sidebar {
+            width: 260px;
+            background: var(--dark);
+            color: #fff;
+            padding: 30px 20px;
+            position: sticky;
+            top: 0;
+            height: 100vh;
+            flex-shrink: 0;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .sidebar .brand {
+            font-size: 22px;
+            font-weight: 700;
+            color: var(--primary);
+            margin-bottom: 40px;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .nav-link {
+            color: #a0aec0;
+            text-decoration: none;
+            display: flex;
+            align-items: center;
+            gap: 15px;
+            padding: 12px 15px;
+            border-radius: 12px;
+            transition: 0.3s;
+            margin-bottom: 8px;
+            font-weight: 500;
+        }
+
+        .nav-link:hover,
+        .nav-link.active {
+            background: rgba(255, 255, 255, 0.05);
+            color: #fff;
+        }
+
+        .nav-link.active {
+            background: var(--primary);
+            box-shadow: 0 4px 12px rgba(78, 115, 223, 0.3);
+        }
+
+        .logout-link {
+            margin-top: auto;
+            color: #fc8181 !important;
+            padding: 12px 15px;
+        }
+
+        /* Main Content */
+        .main-content {
+            flex-grow: 1;
+            padding: 40px;
+            overflow-y: auto;
+        }
+
+        .top-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 35px;
+        }
+
+        .user-badge {
+            background: var(--white);
+            padding: 8px 18px;
+            border-radius: 50px;
+            font-weight: 600;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.02);
+            font-size: 14px;
+        }
+
+        /* Dashboard Cards */
+        .card {
+            background: var(--white);
+            border-radius: 18px;
+            padding: 25px;
+            box-shadow: 0 10px 25px rgba(0, 0, 0, 0.03);
+            margin-bottom: 25px;
+        }
+
+        .banner {
+            background: linear-gradient(135deg, #4e73df 0%, #224abe 100%);
+            color: white;
+        }
+
+        /* Progress Bar */
+        .progress-container {
+            background: rgba(255, 255, 255, 0.2);
+            height: 8px;
+            border-radius: 10px;
+            margin: 15px 0 5px;
+        }
+
+        .progress-fill {
+            background: #fff;
+            height: 100%;
+            border-radius: 10px;
+            transition: 0.8s ease;
+        }
+
+        .layout-grid {
+            display: grid;
+            grid-template-columns: 1fr 2fr;
+            gap: 25px;
+        }
+
+        /* Student Insights cards */
+        .insights-grid {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 20px;
+            margin-bottom: 25px;
+        }
+
+        .insight-card {
+            background: var(--white);
+            border-radius: 16px;
+            padding: 20px;
+            box-shadow: 0 10px 25px rgba(0, 0, 0, 0.03);
+        }
+
+        .insight-label {
+            font-size: 12px;
+            font-weight: 600;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-bottom: 8px;
+        }
+
+        .insight-value {
+            font-size: 28px;
+            font-weight: 700;
+            color: var(--dark);
+            line-height: 1.2;
+        }
+
+        .insight-sub {
+            font-size: 12px;
+            margin-top: 6px;
+            font-weight: 600;
+        }
+
+        .insight-sub.good { color: #1cc88a; }
+        .insight-sub.warn { color: #f6c23e; }
+        .insight-sub.bad { color: #e74a3b; }
+
+        /* Task priority indicator dots */
+        .priority-dot {
+            display: inline-block;
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            margin-right: 6px;
+            vertical-align: middle;
+        }
+
+        .priority-dot.priority-high { background: #e74a3b; }
+        .priority-dot.priority-medium { background: #f6c23e; }
+        .priority-dot.priority-low { background: #bdc3c7; }
+
+        /* Tasks */
+        .task-item {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 15px 0;
+            border-bottom: 1px solid #f1f5f9;
+        }
+
+        .task-item:last-child {
+            border-bottom: none;
+        }
+
+        .task-item.completed h4 {
+            text-decoration: line-through;
+            color: var(--text-muted);
+        }
+
+        .check-icon {
+            font-size: 20px;
+            cursor: pointer;
+            transition: 0.3s;
+            color: #cbd5e0;
+        }
+
+        .task-item.completed .check-icon {
+            color: var(--success);
+        }
+
+        /* Courses */
+        .course-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 25px;
+        }
+
+        .course-card {
+            background: var(--white);
+            border-radius: 18px;
+            overflow: hidden;
+            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.05);
+            transition: 0.3s;
+            border: 1px solid #eee;
+        }
+
+        .course-card:hover {
+            transform: translateY(-8px);
+        }
+
+        .course-header {
+            height: 120px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 40px;
+            color: white;
+        }
+
+        .course-body {
+            padding: 20px;
+        }
+
+        /* Form */
+        input[type="text"] {
+            width: 100%;
+            padding: 12px;
+            border: 1px solid #e2e8f0;
+            border-radius: 10px;
+            margin-bottom: 12px;
+            outline: none;
+        }
+
+        .btn-btn {
+            background: var(--primary);
+            color: white;
+            border: none;
+            padding: 12px;
+            border-radius: 10px;
+            width: 100%;
+            cursor: pointer;
+            font-weight: 600;
+        }
+
+        /* Update the main content to handle the background */
+        .main-content {
+            flex-grow: 1;
+            padding: 40px;
+            overflow-y: auto;
+            background: linear-gradient(rgba(105, 117, 145, 0.85), rgba(67, 77, 106, 0.43)),
+                url('<?php echo $current_bg; ?>');
+            background-size: cover;
+            background-position: center;
+            background-attachment: fixed;
+            transition: background 0.5s ease-in-out;
+        }
+
+        /* Timetable Table Styles */
+        .timetable-container {
+            width: 100%;
+            overflow-x: auto;
+            margin-bottom: 30px;
+        }
+
+        .styled-table {
+            width: 100%;
+            border-collapse: collapse;
+            background: var(--white);
+            border-radius: 15px;
+            overflow: hidden;
+            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.05);
+        }
+
+        .styled-table thead tr {
+            background-color: var(--primary);
+            color: #ffffff;
+            text-align: left;
+            font-weight: 600;
+        }
+
+        .styled-table th,
+        .styled-table td {
+            padding: 15px 20px;
+        }
+
+        .styled-table tbody tr {
+            border-bottom: 1px solid #f1f5f9;
+            transition: 0.2s;
+        }
+
+        .styled-table tbody tr:hover {
+            background-color: #f8faff;
+        }
+
+        .day-badge {
+            padding: 5px 12px;
+            border-radius: 20px;
+            font-size: 11px;
+            font-weight: 700;
+            text-transform: uppercase;
+            background: #eef2ff;
+            color: var(--primary);
+        }
+
+        .time-text {
+            font-weight: 600;
+            color: var(--text-main);
+            font-size: 13px;
+        }
+
+
+
+        .timetable-grid-wrapper {
+            overflow-x: auto;
+            /* Allows scrolling on smaller screens */
+            background: white;
+            padding: 10px;
+            /* Reduced padding */
+            border-radius: 20px;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.05);
+            margin-bottom: 30px;
+        }
+
+        .grid-table {
+            width: max-content;
+            table-layout: auto;
+            /* This forces columns to respect widths and colspans */
+            border-collapse: collapse;
+            
+            /* Ensures it doesn't get too squashed */
+        }
+
+
+        .grid-table th {
+            background: #f8faff;
+            color: var(--primary);
+            font-size: 13px;
+            padding: 15px 5px;
+            border: 1px solid #edf2f7;
+            width: 150px;
+            /* Define the base width of one hour here */
+        }
+
+        .grid-table td {
+            height: 130px;
+            vertical-align: top;
+            padding: 0;
+            border: 1px solid #edf2f7;
+            overflow: hidden;
+            
+        }
+
+        .slot-card {
+            width: 100%;
+            min-height: 130px;
+            box-sizing: border-box;
+            background: #e9f2ff;
+            border-left: 6px solid var(--primary);
+            display: flex;
+            flex-direction: column;
+            justify-content: space-between;
+            align-items: center;
+            text-align: center;
+            padding: 10px;
+        }
+
+        .slot-subject {
+            font-size: 16px;
+            font-weight: 700;
+            color: #1b3d9d;
+            line-height: 1.4;
+            white-space: normal;
+            word-break: break-word;
+        }
+
+        .slot-time {
+            margin-top: 8px;
+            font-size: 13px;
+            color: #4e73df;
+            font-weight: 600;
+        }
+
+        .slot-room {
+            margin-top: 8px;
+            font-size: 12px;
+            color: #666;
+        }
+
+        /* Premium Timetable Styling */
+        .schedule-container {
+            background: var(--white);
+            border-radius: 20px;
+            padding: 30px;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.05);
+            margin-bottom: 30px;
+        }
+
+        .timetable {
+            width: 100%;
+            border-collapse: separate;
+            border-spacing: 0 10px;
+            /* Gap between rows */
+        }
+
+        .timetable th {
+            background: #f8f9fc;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            font-size: 12px;
+            letter-spacing: 1px;
+            padding: 15px;
+            text-align: left;
+            border-bottom: 2px solid #edf2f7;
+        }
+
+        .timetable td {
+            padding: 20px 15px;
+            background: #ffffff;
+            border-top: 1px solid #f1f5f9;
+            border-bottom: 1px solid #f1f5f9;
+        }
+
+        .timetable tr td:first-child {
+            border-left: 1px solid #f1f5f9;
+            border-top-left-radius: 12px;
+            border-bottom-left-radius: 12px;
+            font-weight: 700;
+            color: var(--primary);
+        }
+
+        .timetable tr td:last-child {
+            border-right: 1px solid #f1f5f9;
+            border-top-right-radius: 12px;
+            border-bottom-right-radius: 12px;
+        }
+
+        .timetable tr:hover td {
+            background: #fbfcfe;
+            border-color: var(--primary);
+        }
+
+        .subject-name {
+            font-size: 15px;
+            font-weight: 600;
+            color: var(--dark);
+            display: block;
+        }
+
+        .room-tag {
+            background: #fff5f5;
+            color: #f56565;
+            padding: 4px 10px;
+            border-radius: 6px;
+            font-size: 11px;
+            font-weight: 600;
+        }
+
+
+        @media (max-width: 992px) {
+            .layout-grid {
+                grid-template-columns: 1fr;
+            }
+
+            .insights-grid {
+                grid-template-columns: repeat(2, 1fr);
+            }
+
+            .sidebar {
+                width: 70px;
+                padding: 20px 10px;
+            }
+
+            .sidebar span {
+                display: none;
+            }
+        }
+
+        @media (max-width: 576px) {
+            .insights-grid {
+                grid-template-columns: 1fr;
+            }
+        }

@@ -1,26 +1,29 @@
 <?php
-require_once('auth.php');
-require_once('db.php');
+require_once __DIR__ . '/auth.php';
+require_once __DIR__ . '/helpers.php';
+require_once __DIR__ . '/db.php';
 
 // Ensure fullname exists to avoid explode errors
 $fullname = isset($_SESSION['fullname']) ? $_SESSION['fullname'] : 'Student';
-$user_id = $_SESSION['user_id'];
+$user_id = (int) $_SESSION['user_id'];
 
 // 1. Check if ID is in the URL
 if (!isset($_GET['id']) || empty($_GET['id'])) {
     die("Error: No course ID provided in the URL. Use course_portal.php?id=YOUR_ID");
 }
 
-$course_id = (int)$_GET['id'];
+$course_id = (int) $_GET['id'];
 
-// 2. Fetch the course
-$query = mysqli_query($conn, "SELECT * FROM courses WHERE id='$course_id' AND user_id='$user_id'");
+// 2. Fetch the course (ownership check kept — was already correct here)
+$stmt = $conn->prepare("SELECT * FROM courses WHERE id = ? AND user_id = ?");
+$stmt->bind_param('ii', $course_id, $user_id);
+$stmt->execute();
+$course = $stmt->get_result()->fetch_assoc();
+$stmt->close();
 
-if (mysqli_num_rows($query) == 0) {
+if (!$course) {
     die("Error: Course not found or you do not have permission to view it.");
 }
-
-$course = mysqli_fetch_assoc($query);
 
 // 3. Fallback for progress if column is missing
 $progress = isset($course['progress']) ? $course['progress'] : 0;
@@ -34,30 +37,7 @@ $progress = isset($course['progress']) ? $course['progress'] : 0;
     <title><?php echo htmlspecialchars($course['course_name']); ?> | EduPro</title>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css">
-    <style>
-        /* Keep your existing CSS here */
-        * { margin: 0; padding: 0; box-sizing: border-box; font-family: 'Inter', sans-serif; }
-        body { background: #eef3fb; }
-        .header { background: #4e73df; padding: 20px 40px; display: flex; justify-content: space-between; align-items: center; color: white; box-shadow: 0 4px 15px rgba(0,0,0,.15); }
-        .logo { font-size: 25px; font-weight: 700; }
-        .back-btn { text-decoration: none; color: white; padding: 10px 18px; background: rgba(255,255,255,.15); border-radius: 8px; transition: .3s; }
-        .back-btn:hover { background: white; color: #4e73df; }
-        .container { width: 90%; margin: 40px auto; }
-        .banner { background: linear-gradient(135deg, #4e73df, #224abe); padding: 40px; border-radius: 20px; display: flex; justify-content: space-between; align-items: center; color: white; margin-bottom: 30px; }
-        .banner h1 { font-size: 36px; margin-bottom: 15px; }
-        .grid { display: grid; grid-template-columns: 2fr 1fr; gap: 25px; }
-        .card { background: white; padding: 25px; border-radius: 18px; box-shadow: 0 5px 18px rgba(0,0,0,.08); margin-bottom: 25px; }
-        .info { display: grid; grid-template-columns: repeat(2, 1fr); gap: 20px; }
-        .info-box { background: #f8f9fd; padding: 20px; border-radius: 12px; }
-        .progress { height: 12px; background: #ddd; border-radius: 20px; overflow: hidden; }
-        .progress-fill { height: 100%; background: #00ba94; transition: 0.5s; }
-        .button { display: inline-block; padding: 12px 22px; background: #4e73df; color: white; text-decoration: none; border-radius: 8px; margin-top: 20px; font-weight: 600; }
-        .sidebar-card { background: white; padding: 25px; border-radius: 18px; box-shadow: 0 5px 18px rgba(0,0,0,.08); margin-bottom: 25px; }
-        .list { list-style: none; }
-        .list li { padding: 12px 0; border-bottom: 1px solid #eee; }
-        .badge { display: inline-block; padding: 6px 14px; background: #4e73df; color: white; font-size: 12px; border-radius: 30px; }
-        .quick-btn { display: block; text-align: center; padding: 12px; background: #4e73df; color: white; text-decoration: none; margin-top: 12px; border-radius: 10px; font-weight: 600; }
-    </style>
+    <link rel="stylesheet" href="assets/course_portal.css">
 </head>
 <body>
 
@@ -91,7 +71,7 @@ $progress = isset($course['progress']) ? $course['progress'] : 0;
                         <p><?php echo $progress; ?>% Completed</p>
                     </div>
 
-                    <a class="button" href="<?php echo htmlspecialchars($course['course_link']); ?>" target="_blank">
+                    <a class="button" href="<?php echo e(safe_url($course['course_link'])); ?>" target="_blank" rel="noopener noreferrer">
                         <i class="fas fa-book"></i> Open Course Material
                     </a>
                 </div>
@@ -110,7 +90,7 @@ $progress = isset($course['progress']) ? $course['progress'] : 0;
             <div>
                 <div class="sidebar-card">
                     <h3><i class="fas fa-bolt"></i> Quick Actions</h3>
-                    <a class="quick-btn" href="<?php echo htmlspecialchars($course['course_link']); ?>" target="_blank">Open Material</a>
+                    <a class="quick-btn" href="<?php echo e(safe_url($course['course_link'])); ?>" target="_blank" rel="noopener noreferrer">Open Material</a>
                     <a class="quick-btn" href="dashboard.php?page=schedule">View Schedule</a>
                 </div>
 
