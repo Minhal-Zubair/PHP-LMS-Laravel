@@ -77,6 +77,11 @@ if (isset($_POST['add_task'])) {
         $stmt->bind_param('isissd', $user_id, $task_name, $task_course_id, $task_due_date, $task_priority, $task_hours);
         $stmt->execute();
         $stmt->close();
+
+        // New pending task lowers the completed/total ratio for its course.
+        if ($task_course_id !== null) {
+            recalc_course_progress($conn, $task_course_id);
+        }
     }
     header("Location: dashboard.php?page=dashboard");
     exit();
@@ -85,7 +90,7 @@ if (isset($_POST['add_task'])) {
 // TOGGLE TASK STATUS
 if (isset($_GET['toggle_id'])) {
     $tid = (int) $_GET['toggle_id'];
-    $stmt = $conn->prepare("SELECT status FROM tasks WHERE id = ? AND user_id = ?");
+    $stmt = $conn->prepare("SELECT status, course_id FROM tasks WHERE id = ? AND user_id = ?");
     $stmt->bind_param('ii', $tid, $user_id);
     $stmt->execute();
     $res = $stmt->get_result()->fetch_assoc();
@@ -101,6 +106,10 @@ if (isset($_GET['toggle_id'])) {
         $stmt->bind_param('sii', $new_status, $tid, $user_id);
         $stmt->execute();
         $stmt->close();
+
+        if ($res['course_id'] !== null) {
+            recalc_course_progress($conn, (int) $res['course_id']);
+        }
     }
     header("Location: dashboard.php?page=dashboard");
     exit();
@@ -109,10 +118,22 @@ if (isset($_GET['toggle_id'])) {
 // DELETE TASK
 if (isset($_GET['delete_id'])) {
     $did = (int) $_GET['delete_id'];
+
+    $lookup = $conn->prepare("SELECT course_id FROM tasks WHERE id = ? AND user_id = ?");
+    $lookup->bind_param('ii', $did, $user_id);
+    $lookup->execute();
+    $deleted_task_course_id = $lookup->get_result()->fetch_assoc()['course_id'] ?? null;
+    $lookup->close();
+
     $stmt = $conn->prepare("DELETE FROM tasks WHERE id = ? AND user_id = ?");
     $stmt->bind_param('ii', $did, $user_id);
     $stmt->execute();
     $stmt->close();
+
+    if ($deleted_task_course_id !== null) {
+        recalc_course_progress($conn, (int) $deleted_task_course_id);
+    }
+
     header("Location: dashboard.php?page=dashboard");
     exit();
 }
@@ -263,6 +284,37 @@ if (isset($_POST['add_course'])) {
             "INSERT INTO courses (user_id, course_name, instructor, category, course_link) VALUES (?, ?, ?, ?, ?)"
         );
         $stmt->bind_param('issss', $user_id, $c_name, $inst, $cat, $link);
+        $stmt->execute();
+        $stmt->close();
+    }
+    header("Location: dashboard.php?page=courses");
+    exit();
+}
+
+// ---------------------------------------------------------------------
+// MANUAL COURSE PROGRESS UPDATE
+// Only allowed for courses with zero linked tasks — once a course has
+// tasks linked to it, progress is auto-calculated from task completion
+// (see recalc_course_progress()) and manual edits would just get
+// overwritten the next time a linked task changes, which would be
+// confusing. This keeps there being exactly one source of truth at a time.
+// ---------------------------------------------------------------------
+if (isset($_POST['update_progress'])) {
+    csrf_verify();
+    $progress_course_id = (int) ($_POST['course_id'] ?? 0);
+    $new_progress = max(0, min(100, (int) ($_POST['progress'] ?? 0)));
+
+    // Ownership check + reject if this course actually has linked tasks
+    // (guards against someone POSTing directly to bypass the auto-calc).
+    $stmt = $conn->prepare("SELECT id FROM courses WHERE id = ? AND user_id = ?");
+    $stmt->bind_param('ii', $progress_course_id, $user_id);
+    $stmt->execute();
+    $owns_course = (bool) $stmt->get_result()->fetch_assoc();
+    $stmt->close();
+
+    if ($owns_course && !course_has_linked_tasks($conn, $progress_course_id)) {
+        $stmt = $conn->prepare("UPDATE courses SET progress = ? WHERE id = ? AND user_id = ?");
+        $stmt->bind_param('iii', $new_progress, $progress_course_id, $user_id);
         $stmt->execute();
         $stmt->close();
     }
@@ -561,13 +613,28 @@ if (isset($_GET['edit_sch_id'])) {
 
                 <div class="course-grid">
                     <?php
-                    $stmt = $conn->prepare("SELECT * FROM courses WHERE user_id = ? ORDER BY id DESC");
+                    // Single query: course + how many tasks are linked to it
+                    // and how many are completed. Avoids an N+1 query per
+                    // course card just to know whether progress is
+                    // auto-tracked or manually set.
+                    $stmt = $conn->prepare(
+                        "SELECT c.*,
+                                COUNT(t.id) AS linked_task_count,
+                                SUM(t.status = 'Completed') AS linked_task_done
+                         FROM courses c
+                         LEFT JOIN tasks t ON t.course_id = c.id
+                         WHERE c.user_id = ?
+                         GROUP BY c.id
+                         ORDER BY c.id DESC"
+                    );
                     $stmt->bind_param('i', $user_id);
                     $stmt->execute();
                     $courses = $stmt->get_result();
                     $stmt->close();
                     if ($courses->num_rows > 0):
-                        while ($c = $courses->fetch_assoc()): ?>
+                        while ($c = $courses->fetch_assoc()):
+                            $is_auto_tracked = (int) $c['linked_task_count'] > 0;
+                            ?>
                             <div class="course-card">
                                 <div class="course-header" style="background: var(--primary);"><i class="fas fa-graduation-cap"></i></div>
                                 <div class="course-info" style="padding: 20px;">
@@ -586,6 +653,22 @@ if (isset($_GET['edit_sch_id'])) {
                                             Open Material <i class="fas fa-external-link-alt"></i>
                                         </a>
                                     </div>
+
+                                    <?php if ($is_auto_tracked): ?>
+                                        <div class="progress-source-badge auto">
+                                            <i class="fas fa-link"></i> Auto-tracked &middot; <?php echo (int) $c['linked_task_done']; ?>/<?php echo (int) $c['linked_task_count']; ?> tasks done
+                                        </div>
+                                    <?php else: ?>
+                                        <form method="POST" class="progress-source-badge manual" style="display:flex; align-items:center; gap:8px;">
+                                            <?php echo csrf_field(); ?>
+                                            <input type="hidden" name="course_id" value="<?php echo (int) $c['id']; ?>">
+                                            <i class="fas fa-sliders-h" style="color: var(--text-muted);"></i>
+                                            <input type="range" name="progress" min="0" max="100" step="5" value="<?php echo (int) $c['progress']; ?>"
+                                                   oninput="this.nextElementSibling.textContent = this.value + '%'" style="flex: 1;">
+                                            <span style="font-size: 11px; min-width: 32px;"><?php echo (int) $c['progress']; ?>%</span>
+                                            <button type="submit" name="update_progress" style="font-size: 11px; padding: 4px 10px; border: none; border-radius: 6px; background: var(--primary); color: white; cursor: pointer;">Set</button>
+                                        </form>
+                                    <?php endif; ?>
                                 </div>
                             </div>
                         <?php endwhile;
@@ -622,7 +705,115 @@ if (isset($_GET['edit_sch_id'])) {
                 $schedule_lookup[$row['day']][$key_time] = $row;
             }
             $stmt->close();
+
+            // ---------------------------------------------------------
+            // RECOMMENDED STUDY WINDOW
+            // Rule-based, not AI — two simple steps, both explainable:
+            //  1. Find a free gap in TODAY's schedule (08:00–21:00).
+            //  2. Pick the most urgent "at-risk" course (same rule as the
+            //     dashboard's At-Risk Courses card: progress < 40%, OR a
+            //     pending task due within 3 days) and, if it has an
+            //     urgent linked task, name that task as the activity.
+            // If either step comes up empty, no recommendation is shown —
+            // this never fabricates a suggestion just to have something
+            // to display.
+            // ---------------------------------------------------------
+            $study_window = null;
+            $today_name = date('l');
+            $now_minutes = ((int) date('H')) * 60 + (int) date('i');
+
+            // Step 1: find today's free gaps between 08:00 and 21:00,
+            // working in minutes-since-midnight for easy interval math.
+            $window_start = 8 * 60;
+            $window_end = 21 * 60;
+            $busy = [];
+            if (isset($schedule_lookup[$today_name])) {
+                foreach ($schedule_lookup[$today_name] as $class) {
+                    $s = (int) date('H', strtotime($class['start_time'])) * 60 + (int) date('i', strtotime($class['start_time']));
+                    $e = (int) date('H', strtotime($class['end_time'])) * 60 + (int) date('i', strtotime($class['end_time']));
+                    $busy[] = [max($s, $window_start), min($e, $window_end)];
+                }
+            }
+            sort($busy);
+
+            $gaps = [];
+            $cursor = max($window_start, $now_minutes); // only look at time still ahead of us today
+            foreach ($busy as [$bs, $be]) {
+                if ($bs > $cursor) {
+                    $gaps[] = [$cursor, $bs];
+                }
+                $cursor = max($cursor, $be);
+            }
+            if ($cursor < $window_end) {
+                $gaps[] = [$cursor, $window_end];
+            }
+
+            // Pick the first gap that's at least 30 minutes long.
+            $chosen_gap = null;
+            foreach ($gaps as [$gs, $ge]) {
+                if ($ge - $gs >= 30) {
+                    $chosen_gap = [$gs, min($ge, $gs + 90)]; // cap suggestion at 90 min so it's not "study for 6 hours"
+                    break;
+                }
+            }
+
+            if ($chosen_gap !== null) {
+                // Step 2: most urgent at-risk course, same criteria as the
+                // dashboard's At-Risk Courses card.
+                $stmt = $conn->prepare(
+                    "SELECT c.id, c.course_name, c.progress,
+                            t.id AS urgent_task_id, t.task_name AS urgent_task_name, t.due_date AS urgent_due_date
+                     FROM courses c
+                     LEFT JOIN tasks t ON t.course_id = c.id
+                            AND t.status = 'Pending'
+                            AND t.due_date IS NOT NULL
+                            AND t.due_date BETWEEN CURDATE() AND DATE_ADD(CURDATE(), INTERVAL 3 DAY)
+                     WHERE c.user_id = ? AND (c.progress < 40 OR t.id IS NOT NULL)
+                     ORDER BY (t.id IS NULL) ASC, t.due_date ASC, c.progress ASC
+                     LIMIT 1"
+                );
+                $stmt->bind_param('i', $user_id);
+                $stmt->execute();
+                $target_course = $stmt->get_result()->fetch_assoc();
+                $stmt->close();
+
+                if ($target_course) {
+                    $reasons = [];
+                    if ($target_course['urgent_task_id']) {
+                        $due_label = $target_course['urgent_due_date'] === date('Y-m-d')
+                            ? 'due today' : 'due ' . date('M j', strtotime($target_course['urgent_due_date']));
+                        $reasons[] = "\"{$target_course['urgent_task_name']}\" is {$due_label}";
+                    }
+                    if ((int) $target_course['progress'] < 40) {
+                        $reasons[] = "progress is only {$target_course['progress']}%";
+                    }
+
+                    $study_window = [
+                        'start' => $chosen_gap[0],
+                        'end' => $chosen_gap[1],
+                        'course_name' => $target_course['course_name'],
+                        'reason' => implode(' and ', $reasons),
+                        'activity' => $target_course['urgent_task_name'] ?? ('Review ' . $target_course['course_name']),
+                    ];
+                }
+            }
             ?>
+
+            <?php if ($study_window): ?>
+                <div class="card study-window-card">
+                    <h4><i class="fas fa-bolt"></i> Recommended Study Window</h4>
+                    <div class="study-window-time">
+                        <?php echo date('g:i A', mktime(0, $study_window['start'])); ?> – <?php echo date('g:i A', mktime(0, $study_window['end'])); ?>
+                    </div>
+                    <p style="font-size: 13px; color: var(--text-muted); margin: 6px 0 10px;">
+                        <strong><?php echo e($study_window['course_name']); ?></strong> —
+                        <?php echo e(ucfirst($study_window['reason'])); ?>.
+                    </p>
+                    <div class="study-window-activity">
+                        Recommended activity: <strong><?php echo e($study_window['activity']); ?></strong>
+                    </div>
+                </div>
+            <?php endif; ?>
 
             <?php if (!$has_any_schedule): ?>
                 <div class="card" style="text-align: center; padding: 40px 20px; margin-bottom: 20px; color: var(--text-muted);">

@@ -252,6 +252,25 @@
             padding: 20px;
         }
 
+        /* Course progress source indicator */
+        .progress-source-badge {
+            margin-top: 14px;
+            padding-top: 12px;
+            border-top: 1px solid #f0f0f0;
+        }
+
+        .progress-source-badge.auto {
+            font-size: 11px;
+            color: #1cc88a;
+            font-weight: 600;
+        }
+
+        .progress-source-badge.manual input[type="range"] {
+            width: auto;
+            padding: 0;
+            border: none;
+        }
+
         /* Form */
         input[type="text"] {
             width: 100%;
@@ -339,7 +358,36 @@
             font-size: 13px;
         }
 
+        /* Recommended Study Window card */
+        .study-window-card {
+            background: linear-gradient(135deg, #4e73df 0%, #6a8ef0 100%);
+            color: white;
+        }
 
+        .study-window-card h4 {
+            font-size: 14px;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            opacity: 0.9;
+            margin-bottom: 8px;
+        }
+
+        .study-window-card p {
+            color: rgba(255, 255, 255, 0.9);
+        }
+
+        .study-window-time {
+            font-size: 26px;
+            font-weight: 700;
+        }
+
+        .study-window-activity {
+            background: rgba(255, 255, 255, 0.15);
+            border-radius: 10px;
+            padding: 10px 15px;
+            font-size: 13px;
+        }
 
         .timetable-grid-wrapper {
             overflow-x: auto;

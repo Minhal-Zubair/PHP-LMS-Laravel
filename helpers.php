@@ -13,6 +13,53 @@ function e($value)
 }
 
 // ---------------------------------------------------------------------
+// Course progress tracking
+// ---------------------------------------------------------------------
+
+/**
+ * Recalculates a course's progress % from its linked tasks and saves it.
+ * If the course has zero linked tasks, this does nothing — progress stays
+ * whatever it was (manual-set courses aren't touched by this).
+ * Call this any time a task's course_id, status, or existence changes.
+ */
+function recalc_course_progress(mysqli $conn, int $courseId): void
+{
+    $stmt = $conn->prepare(
+        "SELECT COUNT(*) AS total, SUM(status = 'Completed') AS done
+         FROM tasks WHERE course_id = ?"
+    );
+    $stmt->bind_param('i', $courseId);
+    $stmt->execute();
+    $row = $stmt->get_result()->fetch_assoc();
+    $stmt->close();
+
+    if ((int) $row['total'] === 0) {
+        return; // no linked tasks — leave whatever progress value is set manually
+    }
+
+    $progress = (int) round(((int) $row['done'] / (int) $row['total']) * 100);
+
+    $update = $conn->prepare("UPDATE courses SET progress = ? WHERE id = ?");
+    $update->bind_param('ii', $progress, $courseId);
+    $update->execute();
+    $update->close();
+}
+
+/**
+ * True if the course has at least one linked task — used to decide whether
+ * progress is auto-calculated (has tasks) or manually settable (doesn't).
+ */
+function course_has_linked_tasks(mysqli $conn, int $courseId): bool
+{
+    $stmt = $conn->prepare("SELECT 1 FROM tasks WHERE course_id = ? LIMIT 1");
+    $stmt->bind_param('i', $courseId);
+    $stmt->execute();
+    $has = (bool) $stmt->get_result()->fetch_assoc();
+    $stmt->close();
+    return $has;
+}
+
+// ---------------------------------------------------------------------
 // CSRF protection
 // ---------------------------------------------------------------------
 function csrf_token(): string
