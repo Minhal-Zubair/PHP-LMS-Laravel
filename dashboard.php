@@ -33,35 +33,42 @@ function format_schedule_time($value)
 }
 
 // Determine which page/tab to display (whitelist to avoid surprises)
-$allowed_pages = ['dashboard', 'courses', 'schedule'];
+$allowed_pages = ['dashboard', 'courses', 'schedule', 'calendar'];
 $page = isset($_GET['page']) && in_array($_GET['page'], $allowed_pages, true) ? $_GET['page'] : 'dashboard';
 
 // ---------------------------------------------------------------------
 // ADD TASK
 // ---------------------------------------------------------------------
-if (isset($_POST['add_task'])) {
-    csrf_verify();
-    $task_name = trim($_POST['task_name'] ?? '');
+/**
+ * Validates and normalizes task fields submitted from either the Add Task
+ * or Edit Task forms. Returns a clean array ready for binding — shared so
+ * both handlers apply exactly the same rules (course ownership check,
+ * date format, priority whitelist).
+ */
+function parse_task_input(mysqli $conn, int $userId, array $post): array
+{
+    $task_course_id = !empty($post['course_id']) ? (int) $post['course_id'] : null;
+    $task_due_date = !empty($post['due_date']) ? $post['due_date'] : null;
+    $task_due_time = !empty($post['due_time']) ? $post['due_time'] : null;
+    $task_priority = in_array($post['priority'] ?? '', ['low', 'medium', 'high'], true) ? $post['priority'] : 'medium';
+    $task_hours = (isset($post['estimated_hours']) && $post['estimated_hours'] !== '')
+        ? round((float) $post['estimated_hours'], 2) : null;
 
-    // All of these are optional — a quick task with just a name still works.
-    $task_course_id = !empty($_POST['course_id']) ? (int) $_POST['course_id'] : null;
-    $task_due_date = !empty($_POST['due_date']) ? $_POST['due_date'] : null;
-    $task_priority = in_array($_POST['priority'] ?? '', ['low', 'medium', 'high'], true) ? $_POST['priority'] : 'medium';
-    $task_hours = (isset($_POST['estimated_hours']) && $_POST['estimated_hours'] !== '')
-        ? round((float) $_POST['estimated_hours'], 2) : null;
-
-    // Validate due_date is a real date (reject garbage instead of letting
-    // MySQL silently coerce it to 0000-00-00 or error out).
     if ($task_due_date !== null && !preg_match('/^\d{4}-\d{2}-\d{2}$/', $task_due_date)) {
         $task_due_date = null;
     }
+    // A time only makes sense alongside a date.
+    if ($task_due_date === null) {
+        $task_due_time = null;
+    }
+    if ($task_due_time !== null && !preg_match('/^\d{2}:\d{2}(:\d{2})?$/', $task_due_time)) {
+        $task_due_time = null;
+    }
 
-    // If a course was selected, confirm it actually belongs to this user —
-    // otherwise someone could tag a task to another user's course_id by
-    // editing the form.
+    // Confirm the selected course actually belongs to this user.
     if ($task_course_id !== null) {
         $check = $conn->prepare("SELECT id FROM courses WHERE id = ? AND user_id = ?");
-        $check->bind_param('ii', $task_course_id, $user_id);
+        $check->bind_param('ii', $task_course_id, $userId);
         $check->execute();
         if (!$check->get_result()->fetch_assoc()) {
             $task_course_id = null;
@@ -69,21 +76,95 @@ if (isset($_POST['add_task'])) {
         $check->close();
     }
 
+    return [
+        'course_id' => $task_course_id,
+        'due_date' => $task_due_date,
+        'due_time' => $task_due_time,
+        'priority' => $task_priority,
+        'estimated_hours' => $task_hours,
+    ];
+}
+
+if (isset($_POST['add_task'])) {
+    csrf_verify();
+    $task_name = trim($_POST['task_name'] ?? '');
+    $fields = parse_task_input($conn, $user_id, $_POST);
+
     if ($task_name !== '') {
         $stmt = $conn->prepare(
-            "INSERT INTO tasks (user_id, task_name, status, course_id, due_date, priority, estimated_hours)
-             VALUES (?, ?, 'Pending', ?, ?, ?, ?)"
+            "INSERT INTO tasks (user_id, task_name, status, course_id, due_date, due_time, priority, estimated_hours)
+             VALUES (?, ?, 'Pending', ?, ?, ?, ?, ?)"
         );
-        $stmt->bind_param('isissd', $user_id, $task_name, $task_course_id, $task_due_date, $task_priority, $task_hours);
+        $stmt->bind_param(
+            'isisssd',
+            $user_id,
+            $task_name,
+            $fields['course_id'],
+            $fields['due_date'],
+            $fields['due_time'],
+            $fields['priority'],
+            $fields['estimated_hours']
+        );
         $stmt->execute();
         $stmt->close();
 
-        // New pending task lowers the completed/total ratio for its course.
-        if ($task_course_id !== null) {
-            recalc_course_progress($conn, $task_course_id);
+        if ($fields['course_id'] !== null) {
+            recalc_course_progress($conn, $fields['course_id']);
         }
     }
     header("Location: dashboard.php?page=dashboard");
+    exit();
+}
+
+// EDIT TASK
+if (isset($_POST['update_task'])) {
+    csrf_verify();
+    $edit_task_id = (int) ($_POST['task_id'] ?? 0);
+    $task_name = trim($_POST['task_name'] ?? '');
+
+    // Confirm ownership and grab the OLD course_id first — if the course
+    // link changes, both the old and new course's progress need
+    // recalculating (the old one because it just lost a task, the new one
+    // because it just gained one).
+    $lookup = $conn->prepare("SELECT course_id FROM tasks WHERE id = ? AND user_id = ?");
+    $lookup->bind_param('ii', $edit_task_id, $user_id);
+    $lookup->execute();
+    $existing = $lookup->get_result()->fetch_assoc();
+    $lookup->close();
+
+    if ($existing && $task_name !== '') {
+        $fields = parse_task_input($conn, $user_id, $_POST);
+        $old_course_id = $existing['course_id'] !== null ? (int) $existing['course_id'] : null;
+
+        $stmt = $conn->prepare(
+            "UPDATE tasks SET task_name = ?, course_id = ?, due_date = ?, due_time = ?, priority = ?, estimated_hours = ?
+             WHERE id = ? AND user_id = ?"
+        );
+        $stmt->bind_param(
+            'sisssdii',
+            $task_name,
+            $fields['course_id'],
+            $fields['due_date'],
+            $fields['due_time'],
+            $fields['priority'],
+            $fields['estimated_hours'],
+            $edit_task_id,
+            $user_id
+        );
+        $stmt->execute();
+        $stmt->close();
+
+        if ($old_course_id !== null) {
+            recalc_course_progress($conn, $old_course_id);
+        }
+        if ($fields['course_id'] !== null && $fields['course_id'] !== $old_course_id) {
+            recalc_course_progress($conn, $fields['course_id']);
+        }
+    }
+
+    // Return to wherever the edit was opened from (calendar or dashboard).
+    $return_page = in_array($_POST['return_page'] ?? '', ['dashboard', 'calendar'], true) ? $_POST['return_page'] : 'dashboard';
+    header("Location: dashboard.php?page={$return_page}");
     exit();
 }
 
@@ -157,6 +238,30 @@ $stmt->execute();
 $stats = $stmt->get_result()->fetch_assoc();
 $stmt->close();
 $percent = ($stats['total'] > 0) ? round(($stats['done'] / $stats['total']) * 100) : 0;
+
+// ---------------------------------------------------------------------
+// NOTIFICATIONS & REMINDERS
+// Runs on every page load (the bell icon lives in the shared header, not
+// just the dashboard tab). "Due" here means: the date has passed, or the
+// date is today and either no specific time was set or that time has
+// already passed. This is checked fresh on every request — there's no
+// background process or push notification, so a reminder becomes visible
+// the next time any page is loaded or refreshed at or after its due
+// moment, not the instant it arrives while you're away.
+// ---------------------------------------------------------------------
+$stmt = $conn->prepare(
+    "SELECT t.id, t.task_name, t.due_date, t.due_time, t.priority, c.course_name
+     FROM tasks t
+     LEFT JOIN courses c ON c.id = t.course_id
+     WHERE t.user_id = ? AND t.status = 'Pending' AND t.due_date IS NOT NULL
+     AND (t.due_date < CURDATE() OR (t.due_date = CURDATE() AND (t.due_time IS NULL OR t.due_time <= CURTIME())))
+     ORDER BY t.due_date ASC, t.due_time ASC
+     LIMIT 20"
+);
+$stmt->bind_param('i', $user_id);
+$stmt->execute();
+$reminders = $stmt->get_result()->fetch_all(MYSQLI_ASSOC);
+$stmt->close();
 
 // ---------------------------------------------------------------------
 // STUDENT INSIGHTS (dashboard tab only — skip the extra queries on other
@@ -426,6 +531,9 @@ if (isset($_GET['edit_sch_id'])) {
             <a href="dashboard.php?page=schedule" class="nav-link <?php echo ($page == 'schedule') ? 'active' : ''; ?>">
                 <i class="fas fa-calendar-alt"></i> <span>Schedule</span>
             </a>
+            <a href="dashboard.php?page=calendar" class="nav-link <?php echo ($page == 'calendar') ? 'active' : ''; ?>">
+                <i class="fas fa-calendar-days"></i> <span>Calendar</span>
+            </a>
             <a href="settings-app/public/index.php/settings" class="nav-link"><i class="fas fa-cog"></i> <span>Settings</span></a>
         </nav>
         <a href="logout.php" class="nav-link logout-link">
@@ -442,8 +550,48 @@ if (isset($_GET['edit_sch_id'])) {
                 <h1 style="font-size: 24px;">Welcome, <?php echo e(explode(' ', $fullname)[0]); ?>!</h1>
                 <p style="color: var(--text-muted); font-size: 14px; color: black;"><?php echo date('l, d F Y'); ?></p>
             </div>
-            <div class="user-badge">
-                <i class="fas fa-user-graduate"></i> Student Account
+            <div style="display: flex; align-items: center; gap: 16px;">
+                <details class="notif-dropdown">
+                    <summary class="notif-bell">
+                        <i class="fas fa-bell"></i>
+                        <?php if (count($reminders) > 0): ?>
+                            <span class="notif-badge"><?php echo count($reminders) > 9 ? '9+' : count($reminders); ?></span>
+                        <?php endif; ?>
+                    </summary>
+                    <div class="notif-panel">
+                        <div class="notif-panel-title">Notifications &amp; Reminders</div>
+                        <?php if (empty($reminders)): ?>
+                            <p class="notif-empty">Nothing due right now — you're all caught up.</p>
+                        <?php else: ?>
+                            <?php foreach ($reminders as $r): ?>
+                                <?php
+                                $is_overdue = $r['due_date'] < date('Y-m-d');
+                                $time_label = $r['due_time'] ? date('g:i A', strtotime($r['due_time'])) : '';
+                                ?>
+                                <div class="notif-item">
+                                    <span class="priority-dot priority-<?php echo e($r['priority']); ?>"></span>
+                                    <div style="flex: 1;">
+                                        <div class="notif-item-title"><?php echo e($r['task_name']); ?></div>
+                                        <div class="notif-item-meta">
+                                            <?php if ($is_overdue): ?>
+                                                <span style="color: #e74a3b; font-weight: 600;">Overdue</span> &middot; <?php echo date('M j', strtotime($r['due_date'])); ?>
+                                            <?php else: ?>
+                                                Due today<?php echo $time_label ? " at $time_label" : ''; ?>
+                                            <?php endif; ?>
+                                            <?php if ($r['course_name']): ?>
+                                                &middot; <?php echo e($r['course_name']); ?>
+                                            <?php endif; ?>
+                                        </div>
+                                    </div>
+                                    <a href="dashboard.php?toggle_id=<?php echo (int) $r['id']; ?>" class="notif-item-action" title="Mark complete"><i class="fas fa-check"></i></a>
+                                </div>
+                            <?php endforeach; ?>
+                        <?php endif; ?>
+                    </div>
+                </details>
+                <div class="user-badge">
+                    <i class="fas fa-user-graduate"></i> Student Account
+                </div>
             </div>
         </div>
 
@@ -455,7 +603,13 @@ if (isset($_GET['edit_sch_id'])) {
                     <div class="insight-label">Academic Health</div>
                     <div class="insight-value"><?php echo $insights['academic_health']; ?><span style="font-size:16px; color:var(--text-muted);"> / 100</span></div>
                     <div class="insight-sub <?php echo $insights['academic_health'] >= 70 ? 'good' : ($insights['academic_health'] >= 40 ? 'warn' : 'bad'); ?>">
-                        <?php echo $insights['academic_health'] >= 70 ? '🟢 On Track' : ($insights['academic_health'] >= 40 ? '🟠 Needs Attention' : '🔴 At Risk'); ?>
+                        <?php if ($insights['academic_health'] >= 70): ?>
+                            <i class="fas fa-circle-check"></i> On Track
+                        <?php elseif ($insights['academic_health'] >= 40): ?>
+                            <i class="fas fa-triangle-exclamation"></i> Needs Attention
+                        <?php else: ?>
+                            <i class="fas fa-circle-exclamation"></i> At Risk
+                        <?php endif; ?>
                     </div>
                 </div>
                 <div class="insight-card">
@@ -483,7 +637,7 @@ if (isset($_GET['edit_sch_id'])) {
 
             <?php if (!empty($insights['at_risk_courses'])): ?>
                 <div class="card" style="margin-bottom: 20px; border-left: 4px solid #f6c23e;">
-                    <h4 style="margin-bottom: 12px;">⚠️ Courses Needing Attention</h4>
+                    <h4 style="margin-bottom: 12px;"><i class="fas fa-triangle-exclamation" style="color: #f6c23e;"></i> Courses Needing Attention</h4>
                     <?php foreach ($insights['at_risk_courses'] as $rc): ?>
                         <div style="display: flex; justify-content: space-between; align-items: center; padding: 8px 0; border-bottom: 1px solid #f0f0f0;">
                             <div>
@@ -503,7 +657,7 @@ if (isset($_GET['edit_sch_id'])) {
 
             <?php if (!empty($insights['priority_tasks'])): ?>
                 <div class="card" style="margin-bottom: 20px;">
-                    <h4 style="margin-bottom: 12px;">⚡ Today's Priority</h4>
+                    <h4 style="margin-bottom: 12px;"><i class="fas fa-bolt" style="color: var(--primary);"></i> Today's Priority</h4>
                     <?php foreach ($insights['priority_tasks'] as $i => $pt): ?>
                         <div style="display: flex; justify-content: space-between; align-items: center; padding: 8px 0; <?php echo $i < count($insights['priority_tasks']) - 1 ? 'border-bottom: 1px solid #f0f0f0;' : ''; ?>">
                             <div>
@@ -721,41 +875,19 @@ if (isset($_GET['edit_sch_id'])) {
             $study_window = null;
             $today_name = date('l');
             $now_minutes = ((int) date('H')) * 60 + (int) date('i');
-
-            // Step 1: find today's free gaps between 08:00 and 21:00,
-            // working in minutes-since-midnight for easy interval math.
             $window_start = 8 * 60;
             $window_end = 21 * 60;
-            $busy = [];
+
+            $today_classes = [];
             if (isset($schedule_lookup[$today_name])) {
                 foreach ($schedule_lookup[$today_name] as $class) {
                     $s = (int) date('H', strtotime($class['start_time'])) * 60 + (int) date('i', strtotime($class['start_time']));
                     $e = (int) date('H', strtotime($class['end_time'])) * 60 + (int) date('i', strtotime($class['end_time']));
-                    $busy[] = [max($s, $window_start), min($e, $window_end)];
+                    $today_classes[] = [$s, $e];
                 }
-            }
-            sort($busy);
-
-            $gaps = [];
-            $cursor = max($window_start, $now_minutes); // only look at time still ahead of us today
-            foreach ($busy as [$bs, $be]) {
-                if ($bs > $cursor) {
-                    $gaps[] = [$cursor, $bs];
-                }
-                $cursor = max($cursor, $be);
-            }
-            if ($cursor < $window_end) {
-                $gaps[] = [$cursor, $window_end];
             }
 
-            // Pick the first gap that's at least 30 minutes long.
-            $chosen_gap = null;
-            foreach ($gaps as [$gs, $ge]) {
-                if ($ge - $gs >= 30) {
-                    $chosen_gap = [$gs, min($ge, $gs + 90)]; // cap suggestion at 90 min so it's not "study for 6 hours"
-                    break;
-                }
-            }
+            $chosen_gap = find_free_gap($today_classes, $window_start, $window_end, $now_minutes);
 
             if ($chosen_gap !== null) {
                 // Step 2: most urgent at-risk course, same criteria as the
@@ -812,6 +944,125 @@ if (isset($_GET['edit_sch_id'])) {
                     <div class="study-window-activity">
                         Recommended activity: <strong><?php echo e($study_window['activity']); ?></strong>
                     </div>
+                </div>
+            <?php endif; ?>
+
+            <?php
+            // ---------------------------------------------------------
+            // PLAN MY WEEK
+            // Same rule-based approach as the Study Window card above,
+            // extended across the remaining days of this week (today
+            // through Saturday — the schedule only models Mon-Sat, and
+            // "this week" means what's actually still ahead, not days
+            // that have already passed).
+            //
+            // For each remaining day: find one free gap (reusing
+            // find_free_gap(), same function as today's card), then
+            // assign it to the next course in a queue of "needs
+            // attention" courses (progress < 40%, or a task due within
+            // 7 days), cycling through them so the week doesn't just
+            // repeat the single most urgent course six times.
+            //
+            // Only computed when the button is actually pressed — no
+            // extra queries on a normal page load.
+            // ---------------------------------------------------------
+            $weekly_plan = null;
+            if (isset($_GET['generate_plan'])) {
+                $today_index = array_search($today_name, $days, true);
+                // If today isn't in the Mon-Sat list (i.e. it's Sunday),
+                // the current week is over — plan the upcoming Mon-Sat instead.
+                $remaining_days = ($today_index !== false)
+                    ? array_slice($days, $today_index)
+                    : $days;
+
+                // Build the "needs attention" queue: courses with low
+                // progress or a task due within the next 7 days, each
+                // paired with their single most urgent linked task (if any).
+                $stmt = $conn->prepare(
+                    "SELECT c.id, c.course_name, c.progress,
+                            t.id AS urgent_task_id, t.task_name AS urgent_task_name, t.due_date AS urgent_due_date
+                     FROM courses c
+                     LEFT JOIN (
+                         SELECT t1.*
+                         FROM tasks t1
+                         INNER JOIN (
+                             SELECT course_id, MIN(due_date) AS min_due
+                             FROM tasks
+                             WHERE status = 'Pending' AND due_date IS NOT NULL
+                                   AND due_date BETWEEN CURDATE() AND DATE_ADD(CURDATE(), INTERVAL 7 DAY)
+                             GROUP BY course_id
+                         ) t2 ON t1.course_id = t2.course_id AND t1.due_date = t2.min_due
+                     ) t ON t.course_id = c.id
+                     WHERE c.user_id = ? AND (c.progress < 40 OR t.id IS NOT NULL)
+                     ORDER BY (t.id IS NULL) ASC, t.due_date ASC, c.progress ASC"
+                );
+                $stmt->bind_param('i', $user_id);
+                $stmt->execute();
+                $needs_attention = $stmt->get_result()->fetch_all(MYSQLI_ASSOC);
+                $stmt->close();
+
+                $weekly_plan = [];
+                if (!empty($needs_attention)) {
+                    $queue_index = 0;
+                    foreach ($remaining_days as $day) {
+                        $day_classes = [];
+                        if (isset($schedule_lookup[$day])) {
+                            foreach ($schedule_lookup[$day] as $class) {
+                                $s = (int) date('H', strtotime($class['start_time'])) * 60 + (int) date('i', strtotime($class['start_time']));
+                                $e = (int) date('H', strtotime($class['end_time'])) * 60 + (int) date('i', strtotime($class['end_time']));
+                                $day_classes[] = [$s, $e];
+                            }
+                        }
+
+                        $earliest = ($day === $today_name) ? $now_minutes : $window_start;
+                        $gap = find_free_gap($day_classes, $window_start, $window_end, $earliest);
+
+                        if ($gap !== null) {
+                            $course = $needs_attention[$queue_index % count($needs_attention)];
+                            $queue_index++;
+
+                            $weekly_plan[] = [
+                                'day' => $day,
+                                'start' => $gap[0],
+                                'end' => $gap[1],
+                                'course_name' => $course['course_name'],
+                                'activity' => $course['urgent_task_name'] ?? ('Review ' . $course['course_name']),
+                            ];
+                        }
+                    }
+                }
+            }
+            ?>
+
+            <a href="dashboard.php?page=schedule&generate_plan=1#weekly-plan" class="btn-btn" style="display:inline-block; width:auto; text-decoration:none; margin-bottom: 20px;">
+                <i class="fas fa-wand-magic-sparkles"></i> Generate My Study Plan
+            </a>
+
+            <?php if ($weekly_plan !== null): ?>
+                <div class="card" id="weekly-plan" style="margin-bottom: 20px;">
+                    <h4 style="margin-bottom: 4px;">Your Weekly Plan</h4>
+                    <p style="font-size: 12px; color: var(--text-muted); margin-bottom: 15px;">
+                        Based on your current courses, progress, and upcoming deadlines — updates every time you generate it.
+                    </p>
+
+                    <?php if (empty($weekly_plan)): ?>
+                        <p style="text-align: center; color: var(--text-muted); padding: 20px;">
+                            <?php echo empty($needs_attention)
+                                ? "You're on track — no courses need extra attention this week."
+                                : "No free study slots found in your remaining schedule this week."; ?>
+                        </p>
+                    <?php else: ?>
+                        <?php foreach ($weekly_plan as $item): ?>
+                            <div class="plan-day-row">
+                                <div class="plan-day-name"><?php echo strtoupper(substr($item['day'], 0, 3)); ?></div>
+                                <div>
+                                    <div class="plan-time"><?php echo date('g:i A', mktime(0, $item['start'])); ?> – <?php echo date('g:i A', mktime(0, $item['end'])); ?></div>
+                                    <div class="plan-course"><?php echo e($item['course_name']); ?></div>
+                                    <div class="plan-activity">→ <?php echo e($item['activity']); ?></div>
+                                </div>
+                            </div>
+                        <?php endforeach; ?>
+                    <?php endif; ?>
                 </div>
             <?php endif; ?>
 
@@ -979,6 +1230,138 @@ if (isset($_GET['edit_sch_id'])) {
                         <li style="margin-top:10px;"><i class="fas fa-trash-alt"></i> <strong>Removal:</strong> Deleting a lecture is permanent and will immediately free up those time slots on the grid.</li>
                     </ul>
                 </div>
+            </div>
+        <?php elseif ($page == 'calendar'): ?>
+            <?php
+            // ---------------------------------------------------------
+            // CALENDAR TAB
+            // Monthly grid of the user's own tasks, plotted by due_date.
+            // Month navigation via ?month=YYYY-MM (defaults to current
+            // month). Clicking a task's edit icon opens the Edit Task
+            // form pre-filled — this is the first place in the app tasks
+            // can actually be edited, not just toggled/deleted.
+            // ---------------------------------------------------------
+            $month_param = $_GET['month'] ?? date('Y-m');
+            if (!preg_match('/^\d{4}-\d{2}$/', $month_param)) {
+                $month_param = date('Y-m');
+            }
+            $month_start = $month_param . '-01';
+            $month_ts = strtotime($month_start);
+            $days_in_month = (int) date('t', $month_ts);
+            $first_weekday = (int) date('N', $month_ts); // 1 (Mon) - 7 (Sun)
+            $prev_month = date('Y-m', strtotime('-1 month', $month_ts));
+            $next_month = date('Y-m', strtotime('+1 month', $month_ts));
+
+            // All of this user's tasks with a due_date in this month.
+            $stmt = $conn->prepare(
+                "SELECT t.*, c.course_name FROM tasks t
+                 LEFT JOIN courses c ON c.id = t.course_id
+                 WHERE t.user_id = ? AND t.due_date IS NOT NULL
+                 AND DATE_FORMAT(t.due_date, '%Y-%m') = ?
+                 ORDER BY t.due_date ASC, t.due_time ASC"
+            );
+            $stmt->bind_param('is', $user_id, $month_param);
+            $stmt->execute();
+            $month_tasks = $stmt->get_result()->fetch_all(MYSQLI_ASSOC);
+            $stmt->close();
+
+            $tasks_by_day = [];
+            foreach ($month_tasks as $mt) {
+                $day_num = (int) date('j', strtotime($mt['due_date']));
+                $tasks_by_day[$day_num][] = $mt;
+            }
+
+            // If ?edit_task_id= is present, load that task for the edit form.
+            $edit_task = null;
+            if (isset($_GET['edit_task_id'])) {
+                $etid = (int) $_GET['edit_task_id'];
+                $stmt = $conn->prepare("SELECT * FROM tasks WHERE id = ? AND user_id = ?");
+                $stmt->bind_param('ii', $etid, $user_id);
+                $stmt->execute();
+                $edit_task = $stmt->get_result()->fetch_assoc();
+                $stmt->close();
+            }
+
+            // User's courses, for the edit form's course dropdown.
+            $stmt = $conn->prepare("SELECT id, course_name FROM courses WHERE user_id = ? ORDER BY course_name ASC");
+            $stmt->bind_param('i', $user_id);
+            $stmt->execute();
+            $courses_for_edit_dropdown = $stmt->get_result()->fetch_all(MYSQLI_ASSOC);
+            $stmt->close();
+            ?>
+
+            <div class="top-header">
+                <h2 style="font-size: 20px;"><i class="fas fa-calendar-days"></i> Calendar</h2>
+                <div style="display: flex; align-items: center; gap: 12px;">
+                    <a href="dashboard.php?page=calendar&month=<?php echo $prev_month; ?>" class="calendar-nav-btn"><i class="fas fa-chevron-left"></i></a>
+                    <strong style="min-width: 140px; text-align: center; display: inline-block;"><?php echo date('F Y', $month_ts); ?></strong>
+                    <a href="dashboard.php?page=calendar&month=<?php echo $next_month; ?>" class="calendar-nav-btn"><i class="fas fa-chevron-right"></i></a>
+                </div>
+            </div>
+
+            <?php if ($edit_task): ?>
+                <div class="card" style="border-left: 4px solid var(--primary); margin-bottom: 20px;">
+                    <h4 style="margin-bottom: 15px;"><i class="fas fa-pen"></i> Edit Task</h4>
+                    <form method="POST" action="dashboard.php?page=calendar">
+                        <?php echo csrf_field(); ?>
+                        <input type="hidden" name="task_id" value="<?php echo (int) $edit_task['id']; ?>">
+                        <input type="hidden" name="return_page" value="calendar">
+
+                        <input type="text" name="task_name" value="<?php echo e($edit_task['task_name']); ?>" required style="margin-bottom: 10px;">
+
+                        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 10px;">
+                            <select name="course_id" style="padding: 10px; border-radius: 8px; border: 1px solid #ddd;">
+                                <option value="">No course</option>
+                                <?php foreach ($courses_for_edit_dropdown as $uc): ?>
+                                    <option value="<?php echo (int) $uc['id']; ?>" <?php echo ((int) $edit_task['course_id'] === (int) $uc['id']) ? 'selected' : ''; ?>>
+                                        <?php echo e($uc['course_name']); ?>
+                                    </option>
+                                <?php endforeach; ?>
+                            </select>
+                            <select name="priority" style="padding: 10px; border-radius: 8px; border: 1px solid #ddd;">
+                                <option value="low" <?php echo $edit_task['priority'] === 'low' ? 'selected' : ''; ?>>Low priority</option>
+                                <option value="medium" <?php echo $edit_task['priority'] === 'medium' ? 'selected' : ''; ?>>Medium priority</option>
+                                <option value="high" <?php echo $edit_task['priority'] === 'high' ? 'selected' : ''; ?>>High priority</option>
+                            </select>
+                        </div>
+                        <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; margin-bottom: 15px;">
+                            <input type="date" name="due_date" value="<?php echo e($edit_task['due_date'] ?? ''); ?>" style="padding: 10px; border-radius: 8px; border: 1px solid #ddd;">
+                            <input type="time" name="due_time" value="<?php echo $edit_task['due_time'] ? substr($edit_task['due_time'], 0, 5) : ''; ?>" style="padding: 10px; border-radius: 8px; border: 1px solid #ddd;">
+                            <input type="number" name="estimated_hours" placeholder="Est. hours" step="0.5" min="0" max="99" value="<?php echo e($edit_task['estimated_hours'] ?? ''); ?>" style="padding: 10px; border-radius: 8px; border: 1px solid #ddd;">
+                        </div>
+
+                        <button type="submit" name="update_task" class="btn-btn">Save Changes</button>
+                        <a href="dashboard.php?page=calendar&month=<?php echo $month_param; ?>" style="display:block; text-align:center; margin-top:10px; font-size:12px; color:gray; text-decoration:none;">Cancel</a>
+                    </form>
+                </div>
+            <?php endif; ?>
+
+            <div class="calendar-grid">
+                <?php foreach (['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'] as $wd): ?>
+                    <div class="calendar-weekday"><?php echo $wd; ?></div>
+                <?php endforeach; ?>
+
+                <?php for ($blank = 1; $blank < $first_weekday; $blank++): ?>
+                    <div class="calendar-cell empty"></div>
+                <?php endfor; ?>
+
+                <?php for ($d = 1; $d <= $days_in_month; $d++): ?>
+                    <?php $is_today = ($month_param === date('Y-m') && $d === (int) date('j')); ?>
+                    <div class="calendar-cell <?php echo $is_today ? 'today' : ''; ?>">
+                        <div class="calendar-date"><?php echo $d; ?></div>
+                        <?php if (!empty($tasks_by_day[$d])): ?>
+                            <?php foreach ($tasks_by_day[$d] as $ct): ?>
+                                <div class="calendar-task <?php echo $ct['status'] === 'Completed' ? 'done' : ''; ?>">
+                                    <span class="priority-dot priority-<?php echo e($ct['priority']); ?>"></span>
+                                    <span class="calendar-task-name"><?php echo e($ct['task_name']); ?></span>
+                                    <a href="dashboard.php?page=calendar&month=<?php echo $month_param; ?>&edit_task_id=<?php echo (int) $ct['id']; ?>#top" class="calendar-task-edit" title="Edit">
+                                        <i class="fas fa-pen"></i>
+                                    </a>
+                                </div>
+                            <?php endforeach; ?>
+                        <?php endif; ?>
+                    </div>
+                <?php endfor; ?>
             </div>
         <?php endif; ?>
 

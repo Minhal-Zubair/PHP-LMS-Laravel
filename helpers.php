@@ -59,6 +59,51 @@ function course_has_linked_tasks(mysqli $conn, int $courseId): bool
     return $has;
 }
 
+/**
+ * Finds the first usable free gap in a day given its busy (class) intervals.
+ * All times are minutes-since-midnight for easy arithmetic.
+ *
+ * @param array $classIntervals  Array of [start_minutes, end_minutes] pairs (a day's classes)
+ * @param int   $windowStart     Earliest minute study can start (e.g. 8*60 for 8 AM)
+ * @param int   $windowEnd       Latest minute study can end (e.g. 21*60 for 9 PM)
+ * @param int   $earliestStart   Don't return a gap before this minute (e.g. "now" for today, or $windowStart for future days)
+ * @param int   $minGapMinutes   Shortest gap worth suggesting (default 30 min)
+ * @param int   $capMinutes      Longest single session to suggest, even if the gap is bigger (default 90 min)
+ * @return array|null [start_minutes, end_minutes] of the chosen gap, or null if nothing qualifies
+ */
+function find_free_gap(
+    array $classIntervals,
+    int $windowStart,
+    int $windowEnd,
+    int $earliestStart,
+    int $minGapMinutes = 30,
+    int $capMinutes = 90
+): ?array {
+    sort($classIntervals);
+
+    $gaps = [];
+    $cursor = max($windowStart, $earliestStart);
+    foreach ($classIntervals as [$busyStart, $busyEnd]) {
+        $busyStart = max($busyStart, $windowStart);
+        $busyEnd = min($busyEnd, $windowEnd);
+        if ($busyStart > $cursor) {
+            $gaps[] = [$cursor, $busyStart];
+        }
+        $cursor = max($cursor, $busyEnd);
+    }
+    if ($cursor < $windowEnd) {
+        $gaps[] = [$cursor, $windowEnd];
+    }
+
+    foreach ($gaps as [$gapStart, $gapEnd]) {
+        if ($gapEnd - $gapStart >= $minGapMinutes) {
+            return [$gapStart, min($gapEnd, $gapStart + $capMinutes)];
+        }
+    }
+
+    return null;
+}
+
 // ---------------------------------------------------------------------
 // CSRF protection
 // ---------------------------------------------------------------------

@@ -141,6 +141,7 @@ CREATE TABLE IF NOT EXISTS `tasks` (
   `status` varchar(20) DEFAULT 'Pending',
   `course_id` int(11) DEFAULT NULL,
   `due_date` date DEFAULT NULL,
+  `due_time` time DEFAULT NULL,
   `priority` enum('low','medium','high') NOT NULL DEFAULT 'medium',
   `estimated_hours` decimal(4,2) DEFAULT NULL,
   `completed_at` timestamp NULL DEFAULT NULL,
